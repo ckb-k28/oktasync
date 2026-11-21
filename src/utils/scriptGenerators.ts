@@ -19,10 +19,10 @@ export function generateGithubWorkflowYaml(config: SyncConfig): string {
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
     tags: [ "v*.*.*" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 env:
@@ -63,7 +63,7 @@ jobs:
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
       - name: Build en Push Docker Image
         uses: docker/build-push-action@v6
@@ -85,6 +85,8 @@ export function generateDockerfile(config: SyncConfig): string {
 # ==============================================================================
 FROM python:3.12-slim-bookworm
 
+ARG TARGETARCH=amd64
+
 # Installeer tijdzone-data, ca-certificates en Supercronic (non-root cron runner voor Docker)
 ENV DEBIAN_FRONTEND=noninteractive \\
     TZ=${config.timezone} \\
@@ -97,15 +99,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     tzdata \\
     && rm -rf /var/lib/apt/lists/*
 
-# Installeer Supercronic zodat cronjobs netjes naar Docker stdout/stderr loggen en als non-root draaien
-ENV SUPERCRONIC_URL=https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-linux-amd64 \\
-    SUPERCRONIC=supercronic-linux-amd64 \\
-    SUPERCRONIC_SHA1SUM=cd48d45c4b10f3f0bfdd3a57d054cd05ac96812b
-
-RUN curl -fsSLO "$SUPERCRONIC_URL" \\
-    && echo "\${SUPERCRONIC_SHA1SUM}  \${SUPERCRONIC}" | sha1sum -c - \\
-    && chmod +x "$SUPERCRONIC" \\
-    && mv "$SUPERCRONIC" "/usr/local/bin/supercronic"
+# Installeer Supercronic voor juiste architectuur (amd64 of arm64)
+RUN if [ "\${TARGETARCH}" = "arm64" ]; then \\
+      SUPERCRONIC_URL="https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-linux-arm64"; \\
+      SUPERCRONIC_SHA1="5ab99535437c6d752fd96d27a78e8d3d4a965973"; \\
+    else \\
+      SUPERCRONIC_URL="https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-linux-amd64"; \\
+      SUPERCRONIC_SHA1="cd48d45c4b10f3f0bfdd3a57d054cd05ac96812b"; \\
+    fi \\
+    && curl -fsSL "\${SUPERCRONIC_URL}" -o /usr/local/bin/supercronic \\
+    && echo "\${SUPERCRONIC_SHA1}  /usr/local/bin/supercronic" | sha1sum -c - \\
+    && chmod +x /usr/local/bin/supercronic
 
 # Maak onbevoegde container-gebruiker aan (UID 1000 zodat lokale volume-rechten kloppen)
 RUN groupadd -g 1000 syncgroup && useradd -u 1000 -g syncgroup -m -s /bin/bash syncuser
@@ -140,13 +144,16 @@ export function generateDockerComposeYaml(config: SyncConfig): string {
   const imageRef = `ghcr.io/${config.githubRepo.toLowerCase()}:latest`;
 
   return `# ==============================================================================
-# docker-compose.yml - Draai lokaal op uw Docker Host / NAS / Linux of Windows Server
-# Starten met: docker compose up -d
-# Eenmalige Okta MFA login: docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-auth
+# docker-compose.yml - Draai lokaal op uw Docker Host
+# LET OP bij private GHCR package ('Head .../manifests/latest: denied'):
+#   Voer eerst uit: echo "<GITHUB_PAT>" | docker login ghcr.io -u ${config.githubRepo.split('/')[0]} --password-stdin
+#   Of bouw lokaal vanuit de geclonede repo met: docker compose up -d --build
 # ==============================================================================
 services:
   o365-okta-sync:
     image: ${imageRef}
+    # Uncomment 'build: .' als u direct vanaf lokale git clone wilt bouwen zonder GHCR pull:
+    # build: .
     container_name: ${config.dockerImageName}
     restart: unless-stopped
     environment:

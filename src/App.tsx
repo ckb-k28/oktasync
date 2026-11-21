@@ -1401,6 +1401,17 @@ export default function App() {
                 <tbody className="divide-y divide-slate-200">
                   <tr>
                     <td className="py-2.5 px-3 font-semibold text-slate-900">
+                      GHCR Docker Pull geweigerd (Package is Private of nog niet gepusht)
+                    </td>
+                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
+                      Head &quot;https://ghcr.io/.../manifests/latest&quot;: denied
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-600">
+                      Log eenmalig in met een GitHub PAT (<code className="font-mono">read:packages</code>): <code className="font-mono">echo &quot;$PAT&quot; | docker login ghcr.io -u {config.githubRepo.split('/')[0]} --password-stdin</code>, of zet de package op GitHub op <strong>Public</strong>, of bouw lokaal met <code className="font-mono">docker compose up -d --build</code>.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-2.5 px-3 font-semibold text-slate-900">
                       App-consent geblokkeerd (geen IT goedkeuring)
                     </td>
                     <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
