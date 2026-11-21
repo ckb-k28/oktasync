@@ -1,0 +1,41 @@
+# ==============================================================================
+# docker-compose.yml - Draai lokaal op uw Docker Host
+# LET OP bij private GHCR package ('Head .../manifests/latest: denied'):
+#   Voer eerst uit: echo "<GITHUB_PAT>" | docker login ghcr.io -u ckb-k28 --password-stdin
+#   Of bouw lokaal vanuit de geclonede repo met: docker compose up -d --build
+# ==============================================================================
+services:
+  o365-okta-sync:
+    image: ghcr.io/ckb-k28/oktasync:latest
+    # Uncomment 'build: .' als u direct vanaf lokale git clone wilt bouwen zonder GHCR pull:
+    # build: .
+    container_name: oktasync
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Amsterdam
+      - SYNC_CRON_SCHEDULE=0 8-20/2 * * *
+      - O365_TENANT_DOMAIN=nepinc.sharepoint.com
+      - O365_AUTHORITY=https://login.microsoftonline.com/organizations
+      - O365_SITE_NAME=NEPNL-Operations
+      - O365_SHARED_FOLDER=/02. Callsheets
+      - O365_IGNORE_FOLDERS=Callsheets Archief
+      - O365_CLIENT_ID=d3590ed6-52b3-4102-aeff-aad2292ab01c
+      - OKTA_FEDERATION_URL=https://nepglobal.okta.com
+      - O365_USERNAME_HINT=voornaam.achternaam@nepworldwide.nl
+      - LOCAL_SYNC_DIR=/data/sync
+      - TOKEN_VAULT_FILE=/vault/token_cache.enc
+      # Genereer eenmalig op de host met:
+      # python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - FERNET_VAULT_KEY=${FERNET_VAULT_KEY}
+      - START_HOUR=8
+      - END_HOUR=20
+    volumes:
+      # 1. Lokale map op uw host (/opt/docker/callsheets/*) waar de gedeelde O365 bestanden in komen:
+      - /opt/docker/callsheets:/data/sync:rw
+      # 2. Persistente versleutelde opslag voor het Okta/O365 OAuth2 Refresh Token:
+      - /opt/docker/callsheets-vault:/vault:rw
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

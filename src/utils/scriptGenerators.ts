@@ -150,6 +150,7 @@ services:
       - TZ=${config.timezone}
       - SYNC_CRON_SCHEDULE=${cronExpr}
       - O365_TENANT_DOMAIN=${config.tenantDomain}
+      - O365_AUTHORITY=https://login.microsoftonline.com/organizations
       - O365_SITE_NAME=${config.sharepointSiteName}
       - O365_SHARED_FOLDER=${config.sharedFolderPath}
       - O365_IGNORE_FOLDERS=${config.ignoredFolders.join(',')}
