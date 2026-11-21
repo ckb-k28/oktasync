@@ -7,6 +7,7 @@ CRONTAB_FILE="/tmp/o365_sync_crontab"
 echo "=================================================================="
 echo " O365 + Okta MFA Docker Sync Container Gestart"
 echo " Tijdzone       : ${TZ:-Europe/Amsterdam}"
+echo " Web UI Poort   : http://0.0.0.0:${WEB_PORT:-5555}"
 echo " Cron Schema    : ${CRON_SCHEDULE} (Elke 2u tussen 08:00 en 20:00)"
 echo " Gedeelde Map   : ${O365_SHARED_FOLDER:-/02. Callsheets}"
 echo " Genegeerd      : ${O365_IGNORE_FOLDERS:-Callsheets Archief}"
@@ -18,6 +19,9 @@ if [ ! -f "${TOKEN_VAULT_FILE:-/vault/token_cache.enc}" ]; then
   echo "[ACTIE VEREIST] Voer op de Docker host eenmalig het volgende uit (Username + Password + Okta MFA):"
   echo "  docker exec -it oktasync python3 /app/sync.py --init-auth"
 fi
+
+# Start webinterface op poort 5555 op de achtergrond
+/usr/local/bin/python3 /app/web_server.py &
 
 # Schrijf het 2-uurlijkse schema naar een tijdelijk crontab-bestand voor Supercronic
 echo "${CRON_SCHEDULE} /usr/local/bin/python3 /app/sync.py" > "${CRONTAB_FILE}"

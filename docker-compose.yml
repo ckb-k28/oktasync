@@ -11,8 +11,11 @@ services:
     # build: .
     container_name: oktasync
     restart: unless-stopped
+    ports:
+      - "5555:5555"
     environment:
       - TZ=Europe/Amsterdam
+      - WEB_PORT=5555
       - SYNC_CRON_SCHEDULE=0 8-20/2 * * *
       - O365_TENANT_DOMAIN=nepinc.sharepoint.com
       - O365_AUTHORITY=https://login.microsoftonline.com/organizations

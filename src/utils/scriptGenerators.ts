@@ -76,16 +76,28 @@ jobs:
 
 export function generateDockerfile(config: SyncConfig): string {
   return `# ==============================================================================
-# Dockerfile (linux/amd64) - Headless O365 + Okta MFA Synchronisatie Container
+# Dockerfile (linux/amd64) - O365 + Okta MFA Synchronisatie & Web UI (Poort 5555)
 # Gebouwd via GitHub Actions -> Gehost op lokale Docker omgeving
 # ==============================================================================
+FROM --platform=linux/amd64 node:22-bookworm-slim AS web-builder
+
+WORKDIR /web
+COPY package.json ./
+RUN npm install --no-audit --no-fund
+
+COPY index.html tsconfig.json vite.config.ts ./
+COPY src ./src
+RUN npm run build
+
 FROM --platform=linux/amd64 python:3.12-slim-bookworm
 
 # Installeer tijdzone-data, ca-certificates en Supercronic (non-root cron runner voor Docker)
 ENV DEBIAN_FRONTEND=noninteractive \\
     TZ=${config.timezone} \\
     PYTHONUNBUFFERED=1 \\
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \\
+    WEB_PORT=5555 \\
+    WEB_DIST_DIR=/app/dist
 
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     ca-certificates \\
@@ -112,16 +124,20 @@ RUN pip install --no-cache-dir \\
     cryptography==43.0.1 \\
     requests==2.32.3
 
-# Kopieer applicatiebestanden
+# Kopieer gebouwde webapplicatie en Python sync-bestanden
+COPY --from=web-builder --chown=syncuser:syncgroup /web/dist /app/dist
 COPY --chown=syncuser:syncgroup sync.py /app/sync.py
+COPY --chown=syncuser:syncgroup web_server.py /app/web_server.py
 COPY --chown=syncuser:syncgroup entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/sync.py /app/entrypoint.sh
+RUN chmod +x /app/sync.py /app/web_server.py /app/entrypoint.sh
 
 # Maak mountpoints aan voor lokale doelmap (/data/sync) en versleutelde tokenkluis (/vault)
 RUN mkdir -p ${config.containerDataPath} ${config.containerVaultPath} \\
     && chown -R syncuser:syncgroup ${config.containerDataPath} ${config.containerVaultPath} /app
 
 USER syncuser
+
+EXPOSE 5555
 
 VOLUME ["${config.containerDataPath}", "${config.containerVaultPath}"]
 
@@ -146,8 +162,11 @@ services:
     # build: .
     container_name: ${config.dockerImageName}
     restart: unless-stopped
+    ports:
+      - "5555:5555"
     environment:
       - TZ=${config.timezone}
+      - WEB_PORT=5555
       - SYNC_CRON_SCHEDULE=${cronExpr}
       - O365_TENANT_DOMAIN=${config.tenantDomain}
       - O365_AUTHORITY=https://login.microsoftonline.com/organizations
@@ -201,6 +220,7 @@ CRONTAB_FILE="/tmp/o365_sync_crontab"
 echo "=================================================================="
 echo " O365 + Okta MFA Docker Sync Container Gestart"
 echo " Tijdzone       : \${TZ:-${config.timezone}}"
+echo " Web UI Poort   : http://0.0.0.0:\${WEB_PORT:-5555}"
 echo " Cron Schema    : \${CRON_SCHEDULE} (Elke ${config.intervalHours}u tussen ${String(config.startHour).padStart(2, '0')}:00 en ${String(config.endHour).padStart(2, '0')}:00)"
 echo " Gedeelde Map   : \${O365_SHARED_FOLDER:-${config.sharedFolderPath}}"
 echo " Genegeerd      : \${O365_IGNORE_FOLDERS:-${config.ignoredFolders.join(',')}}"
@@ -212,6 +232,9 @@ if [ ! -f "\${TOKEN_VAULT_FILE:-${config.containerVaultPath}/${vaultFileName}}" 
   echo "[ACTIE VEREIST] Voer op de Docker host eenmalig het volgende uit (Username + Password + Okta MFA):"
   echo "  ${initHint}"
 fi
+
+# Start webinterface op poort 5555 op de achtergrond
+/usr/local/bin/python3 /app/web_server.py &
 
 # Schrijf het 2-uurlijkse schema naar een tijdelijk crontab-bestand voor Supercronic
 echo "\${CRON_SCHEDULE} /usr/local/bin/python3 /app/sync.py" > "\${CRONTAB_FILE}"
@@ -684,12 +707,93 @@ if __name__ == "__main__":
 `;
 }
 
+export function generateWebServerScript(config: SyncConfig): string {
+  return `#!/usr/bin/env python3
+"""
+Lichtgewicht HTTP server voor het O365 Okta Sync Dashboard op poort 5555.
+Serveert de gebouwde frontend (/app/dist) + /api/health endpoint zonder extra dependencies.
+"""
+import json
+import mimetypes
+import os
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+WEB_PORT = int(os.environ.get("WEB_PORT", "5555"))
+DIST_DIR = os.environ.get("WEB_DIST_DIR", "/app/dist")
+VAULT_FILE = os.environ.get("TOKEN_VAULT_FILE", "${config.containerVaultPath}/token_cache.enc")
+
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
+
+
+class SpaRequestHandler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:
+        clean_path = self.path.split("?", 1)[0]
+
+        if clean_path == "/api/health":
+            payload = {
+                "status": "ok",
+                "port": WEB_PORT,
+                "vault_present": os.path.exists(VAULT_FILE),
+                "cron_schedule": os.environ.get("SYNC_CRON_SCHEDULE", "${buildCronExpression(config.startHour, config.endHour, config.intervalHours, config.weekdaysOnly)}"),
+                "shared_folder": os.environ.get("O365_SHARED_FOLDER", "${config.sharedFolderPath}"),
+                "ignored_folders": os.environ.get("O365_IGNORE_FOLDERS", "${config.ignoredFolders.join(',')}"),
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if not os.path.isdir(DIST_DIR):
+            fallback = (
+                "<!doctype html><html lang='nl'><head><meta charset='utf-8'>"
+                "<title>O365 Okta Sync</title></head><body style='font-family:sans-serif;padding:2rem'>"
+                "<h1>O365 Okta Sync Container Actief (Poort 5555)</h1>"
+                "<p>Frontend build (/app/dist) is niet aanwezig; de 2-uurlijkse Supercronic sync draait wel.</p>"
+                "</body></html>"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(fallback)))
+            self.end_headers()
+            self.wfile.write(fallback)
+            return
+
+        dist_abs = os.path.abspath(DIST_DIR)
+        requested = os.path.abspath(os.path.join(dist_abs, clean_path.lstrip("/")))
+        if os.path.commonpath([dist_abs, requested]) != dist_abs or not os.path.isfile(requested):
+            self.path = "/index.html"
+
+        super().do_GET()
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def main() -> None:
+    handler = partial(SpaRequestHandler, directory=DIST_DIR if os.path.isdir(DIST_DIR) else ".")
+    server = ThreadingHTTPServer(("0.0.0.0", WEB_PORT), handler)
+    print(f"[WEB] O365 Okta Sync UI actief op http://0.0.0.0:{WEB_PORT}", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
+`;
+}
+
 export function generateRepoBootstrapScript(config: SyncConfig): string {
   const workflow = generateGithubWorkflowYaml(config);
   const dockerfile = generateDockerfile(config);
   const compose = generateDockerComposeYaml(config);
   const entrypoint = generateEntrypointScript(config);
   const syncPy = generateDockerPythonSyncScript(config);
+  const webServerPy = generateWebServerScript(config);
 
   return `#!/usr/bin/env bash
 # ==============================================================================
@@ -721,10 +825,14 @@ cat << 'EOF_SYNC_PY' > sync.py
 ${syncPy.trimEnd()}
 EOF_SYNC_PY
 
-chmod +x entrypoint.sh sync.py
+cat << 'EOF_WEB_SERVER' > web_server.py
+${webServerPy.trimEnd()}
+EOF_WEB_SERVER
 
-git add .github/workflows/docker-publish.yml Dockerfile docker-compose.yml entrypoint.sh sync.py
-git commit -m "Configureer O365 Okta Sync Docker build (amd64) & GitHub Action"
+chmod +x entrypoint.sh sync.py web_server.py
+
+git add .github/workflows/docker-publish.yml Dockerfile docker-compose.yml entrypoint.sh sync.py web_server.py
+git commit -m "Configureer O365 Okta Sync Docker build (amd64, poort 5555) & GitHub Action"
 git push
 
 echo "Klaar! Open https://github.com/${config.githubRepo}/actions om de gestarte build te volgen."
