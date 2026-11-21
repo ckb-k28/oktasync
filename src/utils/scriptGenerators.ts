@@ -20,6 +20,10 @@ name: Build & Push O365 Okta Sync Docker Image (amd64)
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "*"
   workflow_dispatch:
 
 env:
@@ -678,3 +682,51 @@ if __name__ == "__main__":
         run_folder_sync(force="--force" in sys.argv)
 `;
 }
+
+export function generateRepoBootstrapScript(config: SyncConfig): string {
+  const workflow = generateGithubWorkflowYaml(config);
+  const dockerfile = generateDockerfile(config);
+  const compose = generateDockerComposeYaml(config);
+  const entrypoint = generateEntrypointScript(config);
+  const syncPy = generateDockerPythonSyncScript(config);
+
+  return `#!/usr/bin/env bash
+# ==============================================================================
+# setup-repo.sh - Zet alle bestanden in de juiste mappen (incl. .github/workflows)
+# en pusht naar https://github.com/${config.githubRepo} om direct de Action te starten.
+# Gebruik: voer dit script uit in uw geclonede git-map van ${config.githubRepo}
+# ==============================================================================
+set -euo pipefail
+
+mkdir -p .github/workflows
+
+cat << 'EOF_WORKFLOW' > .github/workflows/docker-publish.yml
+${workflow.trimEnd()}
+EOF_WORKFLOW
+
+cat << 'EOF_DOCKERFILE' > Dockerfile
+${dockerfile.trimEnd()}
+EOF_DOCKERFILE
+
+cat << 'EOF_COMPOSE' > docker-compose.yml
+${compose.trimEnd()}
+EOF_COMPOSE
+
+cat << 'EOF_ENTRYPOINT' > entrypoint.sh
+${entrypoint.trimEnd()}
+EOF_ENTRYPOINT
+
+cat << 'EOF_SYNC_PY' > sync.py
+${syncPy.trimEnd()}
+EOF_SYNC_PY
+
+chmod +x entrypoint.sh sync.py
+
+git add .github/workflows/docker-publish.yml Dockerfile docker-compose.yml entrypoint.sh sync.py
+git commit -m "Configureer O365 Okta Sync Docker build (amd64) & GitHub Action"
+git push
+
+echo "Klaar! Open https://github.com/${config.githubRepo}/actions om de gestarte build te volgen."
+`;
+}
+

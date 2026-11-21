@@ -34,11 +34,12 @@ import {
   generateDockerfile,
   generateDockerComposeYaml,
   generateEntrypointScript,
-  generateDockerPythonSyncScript
+  generateDockerPythonSyncScript,
+  generateRepoBootstrapScript
 } from './utils/scriptGenerators';
 
 type ActiveSection = 'overzicht' | 'authenticatie' | 'planning' | 'scripts' | 'simulatie';
-type ScriptTab = 'dockerfile' | 'docker-compose' | 'github-workflow' | 'sync-py' | 'entrypoint';
+type ScriptTab = 'dockerfile' | 'docker-compose' | 'github-workflow' | 'sync-py' | 'entrypoint' | 'setup-repo';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -123,7 +124,7 @@ export default function App() {
       },
       'github-workflow': {
         filename: '.github/workflows/docker-publish.yml',
-        label: 'GitHub Actions Multi-Arch Build & Push naar GHCR',
+        label: 'GitHub Actions Build & Push bij elke git push (linux/amd64)',
         content: generateGithubWorkflowYaml(config)
       },
       'sync-py': {
@@ -135,6 +136,11 @@ export default function App() {
         filename: 'entrypoint.sh',
         label: 'Container Entrypoint & Supercronic 08:00–20:00 Crontab',
         content: generateEntrypointScript(config)
+      },
+      'setup-repo': {
+        filename: 'setup-repo.sh',
+        label: '1-Stap Repo Setup & Git Push Script (zet .github/workflows exact goed)',
+        content: generateRepoBootstrapScript(config)
       }
     };
   }, [config]);
@@ -862,6 +868,16 @@ export default function App() {
                   }`}
                 >
                   entrypoint.sh
+                </button>
+                <button
+                  onClick={() => setScriptTab('setup-repo')}
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    scriptTab === 'setup-repo'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  setup-repo.sh
                 </button>
               </div>
             </div>
