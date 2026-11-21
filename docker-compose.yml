@@ -22,11 +22,12 @@ services:
       - O365_SITE_NAME=NEPNL-Operations
       - O365_SHARED_FOLDER=/02. Callsheets
       - O365_IGNORE_FOLDERS=Callsheets Archief
-      - O365_CLIENT_ID=d3590ed6-52b3-4102-aeff-aad2292ab01c
+      - O365_CLIENT_ID=14d82eec-204b-4c2f-b7e8-296a70dab67e
       - OKTA_FEDERATION_URL=https://nepglobal.okta.com
       - O365_USERNAME_HINT=voornaam.achternaam@nepworldwide.nl
       - LOCAL_SYNC_DIR=/data/sync
       - TOKEN_VAULT_FILE=/vault/token_cache.enc
+      - COOKIE_VAULT_FILE=/vault/sp_cookies.enc
       # Genereer eenmalig op de host met:
       # python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       - FERNET_VAULT_KEY=${FERNET_VAULT_KEY}

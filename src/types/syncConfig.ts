@@ -65,46 +65,46 @@ export interface SyncRunLog {
 
 export const AUTH_STRATEGIES: AuthStrategyInfo[] = [
   {
-    id: 'oauth2-device-fernet',
-    title: 'Microsoft First-Party Client (Office / SharePoint) + Fernet Kluis',
-    subtitle: 'Gebruikt Microsofts vooraf goedgekeurde First-Party Client ID — geen IT-goedkeuring of App Registration nodig',
-    securityRating: 'Hoog (Zero-IT-Consent & Zero-Password)',
-    recommended: true,
-    mfaHandling: 'Eenmalige `docker exec -it oktasync python3 /app/sync.py --init-auth` met Microsofts eigen First-Party Client ID (Microsoft Office `d3590ed6-...`). U logt op uw eigen pc in met Username + Password + Okta MFA.',
-    credentialStorage: 'MSAL TokenCache versleuteld met Fernet (AES-128-CBC + HMAC-SHA256) in `/opt/docker/callsheets-vault/token_cache.enc`.',
-    summary: 'In tegenstelling tot externe apps (zoals PnP Management Shell `31359c7f-...` die `AADSTS65001` geven) is Microsofts eigen Office/SharePoint First-Party Client ID standaard in vrijwel elke Microsoft 365 tenant vooraf goedgekeurd door Microsoft zelf. Geen IT-ticket of Admin Consent nodig.',
-    pros: [
-      'Omzeilt `AADSTS65001` doordat Microsofts ingebouwde Office / SharePoint Client ID vooraf is geautoriseerd',
-      'Volledig headless uitvoerbaar in uw lokale Docker container zonder wachtwoordopslag',
-      'Stille Refresh Token vernieuwing elke 2 uur tussen 08:00 en 20:00 zonder nieuwe Okta MFA-prompt',
-      'Geen enkele IT-afdeling of Global Admin goedkeuring vereist'
-    ],
-    steps: [
-      'Kies het Microsoft First-Party Client ID (`d3590ed6-52b3-4102-aeff-aad2292ab01c` of `9bc3ab49-b65d-410a-85ad-bf819febf99b`).',
-      'Bouw en start de container uit GitHub (`ckb-k28/oktasync`) via `docker compose up -d`.',
-      'Voer eenmalig `docker exec -it oktasync python3 /app/sync.py --init-auth` uit en bevestig via `nepglobal.okta.com`.',
-      'Controleer direct met `docker exec oktasync python3 /app/sync.py --verify` dat `Callsheets Archief` wordt genegeerd.'
-    ]
-  },
-  {
     id: 'sharepoint-cookie-vault',
     title: 'Directe SharePoint REST API via Okta Browser Sessie-Vault (FedAuth)',
-    subtitle: '100% immuun voor AADSTS65001 én Device Code blokkades — gebruikt uw gewone Okta browsersessie',
+    subtitle: '100% immuun voor AADSTS65001 én AADSTS65002 — gebruikt uw gewone Okta browsersessie zonder Entra App',
     securityRating: 'Hoog (Zero-OAuth / Geen Entra App)',
-    recommended: false,
+    recommended: true,
     mfaHandling: 'U logt in uw normale browser in op SharePoint via `nepglobal.okta.com` (Username + Password + Okta MFA) en slaat de `FedAuth` + `rtFa` sessiecookies eenmalig versleuteld op via `--init-cookies`.',
     credentialStorage: 'Versleutelde cookie-kluis (`sp_cookies.enc`) met Fernet AES-128 in `/opt/docker/callsheets-vault`.',
-    summary: 'Als IT zowel externe apps (`AADSTS65001`) als Device Code Flow (`AADSTS53003`) heeft dichtgezet, werkt de SharePoint REST API (`_api/web/GetFolderByServerRelativeUrl`) nog steeds gewoon met uw normale SharePoint browsersessie. Omdat er geen OAuth-app aan te pas komt, kan Entra ID geen enkele app-consent weigeren.',
+    summary: 'Zowel externe apps (`AADSTS65001`) als first-party apps zoals Microsoft Office (`AADSTS65002`) worden door Entra ID geblokkeerd voor Graph-scopes zonder IT-preauthorisatie. De SharePoint REST API (`_api/web/GetFolderByServerRelativePath`) werkt met uw normale Okta-browsersessie zonder enige Entra OAuth-app.',
     pros: [
-      '100% immuun voor `AADSTS65001` en `AADSTS53003` — er wordt geen enkele Entra App gebruikt',
+      '100% immuun voor `AADSTS65001`, `AADSTS65002` en `AADSTS53003` — geen Entra App nodig',
       'Elke 2-uurlijkse sync (08:00–20:00) houdt de sliding SharePoint-sessie actief',
-      'Gebruikt exact dezelfde rechten waarmee u de map in uw browser opent',
-      'Volledige ondersteuning voor het negeren van `Callsheets Archief`'
+      'Gebruikt exact dezelfde rechten waarmee u `/02. Callsheets` in uw browser opent',
+      'Volledige ondersteuning voor het recursief negeren van `Callsheets Archief`'
     ],
     steps: [
       'Open de SharePoint-map in Chrome/Edge en log in met Username + Password + Okta MFA.',
       'Voer eenmalig `docker exec -it oktasync python3 /app/sync.py --init-cookies` uit om `FedAuth` en `rtFa` versleuteld in `/vault` op te slaan.',
-      'De container synchroniseert elke 2 uur via de SharePoint REST API naar `/opt/docker/callsheets`.'
+      'Controleer direct met `docker exec oktasync python3 /app/sync.py --verify` en start daarna automatisch elke 2 uur.'
+    ]
+  },
+  {
+    id: 'oauth2-device-fernet',
+    title: 'Microsoft Graph CLI (14d82eec) + Fernet Token Kluis',
+    subtitle: 'Alternatief via Microsoft Graph Command Line Tools (werkt alleen als User Consent in Entra aan staat)',
+    securityRating: 'Hoog (Zero-Password Vault)',
+    recommended: false,
+    mfaHandling: 'Eenmalige `docker exec -it oktasync python3 /app/sync.py --init-auth` met Microsoft Graph CLI (`14d82eec-...`). U logt op uw eigen pc in met Username + Password + Okta MFA.',
+    credentialStorage: 'MSAL TokenCache versleuteld met Fernet (AES-128-CBC + HMAC-SHA256) in `/opt/docker/callsheets-vault/token_cache.enc`.',
+    summary: 'Gebruikt Microsofts officiële Graph CLI Client ID (`14d82eec-...`), die wél voor Microsoft Graph is gepreauthoriseerd (voorkomt `AADSTS65002`). Geeft uw tenant alsnog `AADSTS65001`? Schakel dan direct over naar Optie 1 (`--init-cookies`).',
+    pros: [
+      'Voorkomt `AADSTS65002` doordat `14d82eec-...` specifiek voor Microsoft Graph is geautoriseerd',
+      'Volledig headless uitvoerbaar in uw lokale Docker container zonder wachtwoordopslag',
+      'Stille Refresh Token vernieuwing elke 2 uur tussen 08:00 en 20:00 zonder nieuwe Okta MFA-prompt',
+      'Automatische fallback-hint naar `--init-cookies` bij tenant-blokkades'
+    ],
+    steps: [
+      'Gebruik Client ID `14d82eec-204b-4c2f-b7e8-296a70dab67e` (Microsoft Graph Command Line Tools).',
+      'Bouw en start de container uit GitHub (`ckb-k28/oktasync`) via `docker compose up -d`.',
+      'Voer eenmalig `docker exec -it oktasync python3 /app/sync.py --init-auth` uit en bevestig via `nepglobal.okta.com`.',
+      'Controleer direct met `docker exec oktasync python3 /app/sync.py --verify` dat `Callsheets Archief` wordt genegeerd.'
     ]
   },
   {

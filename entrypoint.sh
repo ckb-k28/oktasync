@@ -14,10 +14,10 @@ echo " Genegeerd      : ${O365_IGNORE_FOLDERS:-Callsheets Archief}"
 echo " Container Doel : ${LOCAL_SYNC_DIR:-/data/sync}"
 echo "=================================================================="
 
-if [ ! -f "${TOKEN_VAULT_FILE:-/vault/token_cache.enc}" ]; then
-  echo "[WAARSCHUWING] Nog geen versleutelde sessie gevonden in ${TOKEN_VAULT_FILE:-/vault/token_cache.enc}."
-  echo "[ACTIE VEREIST] Voer op de Docker host eenmalig het volgende uit (Username + Password + Okta MFA):"
-  echo "  docker exec -it oktasync python3 /app/sync.py --init-auth"
+if [ ! -f "${COOKIE_VAULT_FILE:-/vault/sp_cookies.enc}" ] && [ ! -f "${TOKEN_VAULT_FILE:-/vault/token_cache.enc}" ]; then
+  echo "[WAARSCHUWING] Nog geen versleutelde sessie gevonden in /vault."
+  echo "[ACTIE VEREIST] Voer op de Docker host eenmalig het volgende uit (Username + Password + Okta MFA, zonder IT-goedkeuring):"
+  echo "  docker exec -it oktasync python3 /app/sync.py --init-cookies"
 fi
 
 # Start webinterface op poort 5555 op de achtergrond

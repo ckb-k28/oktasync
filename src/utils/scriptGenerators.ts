@@ -178,6 +178,7 @@ services:
       - O365_USERNAME_HINT=${config.usernameHint}
       - LOCAL_SYNC_DIR=${config.containerDataPath}
       - TOKEN_VAULT_FILE=${config.containerVaultPath}/token_cache.enc
+      - COOKIE_VAULT_FILE=${config.containerVaultPath}/sp_cookies.enc
       # Genereer eenmalig op de host met:
       # python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       - FERNET_VAULT_KEY=\${FERNET_VAULT_KEY}
@@ -327,9 +328,13 @@ def build_sp_session() -> requests.Session:
     session.headers.update({"Accept": "application/json;odata=nometadata"})
     return session
 
+def encode_odata_path(path_value: str) -> str:
+    escaped = path_value.replace("'", "''")
+    return urllib.parse.quote(escaped, safe="/")
+
 def sp_get_folder_items(session: requests.Session, server_rel_path: str) -> tuple[list, list]:
-    encoded = urllib.parse.quote(server_rel_path)
-    base_api = f"https://{TENANT_DOMAIN}/sites/{SITE_NAME}/_api/web/GetFolderByServerRelativeUrl('{encoded}')"
+    encoded = encode_odata_path(server_rel_path)
+    base_api = f"https://{TENANT_DOMAIN}/sites/{SITE_NAME}/_api/web/GetFolderByServerRelativePath(decodedurl='{encoded}')"
     folders_resp = session.get(f"{base_api}/Folders", timeout=30)
     if folders_resp.status_code in (401, 403):
         raise RuntimeError("SharePoint sessie verlopen of ongeldig (HTTP 401/403). Vernieuw via --init-cookies.")
@@ -379,8 +384,8 @@ def sync_recursive(session: requests.Session, server_rel_path: str, local_dir: s
         if os.path.exists(target_path) and os.path.getsize(target_path) == remote_size:
             continue
 
-        encoded_rel = urllib.parse.quote(f"{server_rel_path}/{fname}")
-        dl_url = f"https://{TENANT_DOMAIN}/sites/{SITE_NAME}/_api/web/GetFileByServerRelativeUrl('{encoded_rel}')/$value"
+        encoded_rel = encode_odata_path(f"{server_rel_path}/{fname}")
+        dl_url = f"https://{TENANT_DOMAIN}/sites/{SITE_NAME}/_api/web/GetFileByServerRelativePath(decodedurl='{encoded_rel}')/$value"
         with session.get(dl_url, stream=True, timeout=120) as r:
             r.raise_for_status()
             with open(target_path, "wb") as out:

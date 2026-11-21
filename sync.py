@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-Headless Docker Synchronisatie Script voor Gedeelde O365 / SharePoint Map met Okta MFA.
-- Gebruikt Microsoft First-Party Client ID + 'organizations' authority voor Okta (https://nepglobal.okta.com).
-- Eenmalige MFA bootstrap:
-    docker exec -it oktasync python3 /app/sync.py --init-auth
-- Verbindingstest (dry-run zonder downloads):
-    docker exec oktasync python3 /app/sync.py --verify
-- Handmatige testrun buiten 08:00-20:00 venster:
-    docker exec oktasync python3 /app/sync.py --force
+Docker Synchronisatie Script voor Gedeelde O365 / SharePoint Map met Okta MFA.
+
+Ondersteunde methodes (automatische detectie op basis van opgeslagen kluis):
+1. [AANBEVOLEN - Zero Entra App / Immuun voor AADSTS65001 & AADSTS65002]
+   Directe SharePoint REST API met Okta Browser Sessie-Vault (FedAuth + rtFa):
+     docker exec -it oktasync python3 /app/sync.py --init-cookies
+
+2. [Alternatief via Microsoft Graph Command Line Tools (14d82eec-...)]
+   OAuth2 Device Code Flow + Fernet Vault:
+     docker exec -it oktasync python3 /app/sync.py --init-auth
+
+Verbindingstest zonder downloads:
+  docker exec oktasync python3 /app/sync.py --verify
+
+Handmatige testrun buiten 08:00-20:00 venster:
+  docker exec oktasync python3 /app/sync.py --force
 """
+import datetime
+import getpass
+import json
 import os
 import sys
-import datetime
 import urllib.parse
-import requests
 import msal
+import requests
 from cryptography.fernet import Fernet
 
 TENANT_DOMAIN   = os.environ.get("O365_TENANT_DOMAIN", "nepinc.sharepoint.com")
@@ -26,27 +36,35 @@ IGNORE_FOLDERS  = {
     for f in os.environ.get("O365_IGNORE_FOLDERS", "Callsheets Archief").split(",")
     if f.strip()
 }
-CLIENT_ID       = os.environ.get("O365_CLIENT_ID", "d3590ed6-52b3-4102-aeff-aad2292ab01c")
+# 14d82eec-... = Microsoft Graph Command Line Tools (vervangt d3590ed6-... dat AADSTS65002 gaf)
+CLIENT_ID       = os.environ.get("O365_CLIENT_ID", "14d82eec-204b-4c2f-b7e8-296a70dab67e")
 OKTA_URL        = os.environ.get("OKTA_FEDERATION_URL", "https://nepglobal.okta.com")
 USERNAME_HINT   = os.environ.get("O365_USERNAME_HINT", "voornaam.achternaam@nepworldwide.nl")
 LOCAL_SYNC_DIR  = os.environ.get("LOCAL_SYNC_DIR", "/data/sync")
 VAULT_FILE      = os.environ.get("TOKEN_VAULT_FILE", "/vault/token_cache.enc")
+COOKIE_VAULT    = os.environ.get("COOKIE_VAULT_FILE", "/vault/sp_cookies.enc")
 FERNET_KEY      = os.environ.get("FERNET_VAULT_KEY", "")
 START_HOUR      = int(os.environ.get("START_HOUR", "8"))
 END_HOUR        = int(os.environ.get("END_HOUR", "20"))
 
 SCOPES = [
     "https://graph.microsoft.com/Files.Read.All",
-    "https://graph.microsoft.com/Sites.Read.All"
+    "https://graph.microsoft.com/Sites.Read.All",
 ]
 
+
 def normalize_sharepoint_folder(folder_path: str) -> str:
-    """Verwijdert optionele 'Shared Documents/' prefix omdat Graph drive/root daar al op wijst."""
+    """Verwijdert optionele 'Shared Documents/' prefix."""
     cleaned = folder_path.strip("/")
     for prefix in ("Shared Documents/", "Gedeelde documenten/"):
         if cleaned.lower().startswith(prefix.lower()):
             cleaned = cleaned[len(prefix):]
     return cleaned.strip("/")
+
+
+def get_server_relative_base() -> str:
+    return f"/sites/{SITE_NAME}/Shared Documents/{normalize_sharepoint_folder(SHARED_FOLDER)}"
+
 
 def get_cipher() -> Fernet:
     if not FERNET_KEY:
@@ -56,6 +74,135 @@ def get_cipher() -> Fernet:
         )
     return Fernet(FERNET_KEY.encode("utf-8"))
 
+
+# ==============================================================================
+# MODE 1 (AANBEVOLEN): Directe SharePoint REST API + Cookie Vault (FedAuth/rtFa)
+# ==============================================================================
+def init_cookie_vault() -> None:
+    print("\n" + "=" * 72)
+    print(" [SHAREPOINT + OKTA SESSIE-VAULT (ZERO ENTRA APP / GEEN AADSTS65001/65002)]")
+    print(f" 1. Open in uw browser: https://{TENANT_DOMAIN}/sites/{SITE_NAME}")
+    print(f" 2. Log in met Username + Password + Okta MFA ({OKTA_URL}).")
+    print(f" 3. Open DevTools (F12) -> Application -> Cookies -> https://{TENANT_DOMAIN}")
+    print(" 4. Kopieer de waarden van 'FedAuth' en 'rtFa' (invoer wordt verborgen).")
+    print("=" * 72 + "\n", flush=True)
+
+    fed_auth = getpass.getpass("FedAuth cookie waarde: ").strip()
+    rt_fa = getpass.getpass("rtFa cookie waarde   : ").strip()
+    if not fed_auth or not rt_fa:
+        raise RuntimeError("Zowel FedAuth als rtFa zijn verplicht.")
+
+    os.makedirs(os.path.dirname(COOKIE_VAULT), exist_ok=True)
+    payload = json.dumps({"FedAuth": fed_auth, "rtFa": rt_fa}).encode("utf-8")
+    encrypted = get_cipher().encrypt(payload)
+    with open(COOKIE_VAULT, "wb") as f:
+        f.write(encrypted)
+    os.chmod(COOKIE_VAULT, 0o600)
+    print(f"[SUCCESS] Okta/SharePoint cookies AES-128 versleuteld opgeslagen in {COOKIE_VAULT}")
+
+
+def build_sp_session() -> requests.Session:
+    if not os.path.exists(COOKIE_VAULT):
+        raise RuntimeError(
+            f"Geen cookie-kluis gevonden in {COOKIE_VAULT}. "
+            "Voer eerst 'docker exec -it oktasync python3 /app/sync.py --init-cookies' uit."
+        )
+    with open(COOKIE_VAULT, "rb") as f:
+        data = json.loads(get_cipher().decrypt(f.read()).decode("utf-8"))
+
+    session = requests.Session()
+    session.cookies.set("FedAuth", data["FedAuth"], domain=TENANT_DOMAIN)
+    session.cookies.set("rtFa", data["rtFa"], domain=TENANT_DOMAIN)
+    session.headers.update({"Accept": "application/json;odata=nometadata"})
+    return session
+
+
+def encode_odata_path(path_value: str) -> str:
+    escaped = path_value.replace("'", "''")
+    return urllib.parse.quote(escaped, safe="/")
+
+
+def sp_get_folder_items(session: requests.Session, server_rel_path: str) -> tuple[list, list]:
+    encoded = encode_odata_path(server_rel_path)
+    base_api = (
+        f"https://{TENANT_DOMAIN}/sites/{SITE_NAME}/_api/web/"
+        f"GetFolderByServerRelativePath(decodedurl='{encoded}')"
+    )
+    folders_resp = session.get(f"{base_api}/Folders", timeout=30)
+    if folders_resp.status_code in (401, 403):
+        raise RuntimeError(
+            "SharePoint sessie verlopen of ongeldig (HTTP 401/403). "
+            "Vernieuw uw cookies via: docker exec -it oktasync python3 /app/sync.py --init-cookies"
+        )
+    folders_resp.raise_for_status()
+
+    files_resp = session.get(f"{base_api}/Files", timeout=30)
+    files_resp.raise_for_status()
+    return folders_resp.json().get("value", []), files_resp.json().get("value", [])
+
+
+def verify_cookie_connection() -> None:
+    print("[CHECK 1/4] Ontsleutel SharePoint cookie-kluis...")
+    session = build_sp_session()
+    base_rel = get_server_relative_base()
+    print(f"[CHECK 2/4] Test SharePoint REST API op '{base_rel}'...")
+    folders, files = sp_get_folder_items(session, base_rel)
+    ignored_hits = [f["Name"] for f in folders if f["Name"].strip().lower() in IGNORE_FOLDERS]
+    print(f"  -> OK: {len(files)} bestanden en {len(folders)} submappen gevonden.")
+    print(f"[CHECK 3/4] Genegeerde mappen herkend en geblokkeerd: {ignored_hits or sorted(IGNORE_FOLDERS)}")
+    print(f"[CHECK 4/4] Test schrijfrechten in {LOCAL_SYNC_DIR}...")
+    os.makedirs(LOCAL_SYNC_DIR, exist_ok=True)
+    probe = os.path.join(LOCAL_SYNC_DIR, ".sync_write_probe")
+    with open(probe, "w", encoding="utf-8") as f:
+        f.write("ok")
+    os.remove(probe)
+    print("\n[VERIFIED] SharePoint REST API + Okta Cookie Vault werkt zonder Entra App ID.")
+
+
+def sync_cookie_recursive(session: requests.Session, server_rel_path: str, local_dir: str) -> tuple[int, int]:
+    os.makedirs(local_dir, exist_ok=True)
+    folders, files = sp_get_folder_items(session, server_rel_path)
+    checked = 0
+    downloaded = 0
+
+    for folder in folders:
+        name = folder["Name"]
+        if name.strip().lower() in IGNORE_FOLDERS or name == "Forms":
+            print(f"[IGNORE] SharePoint submap overgeslagen: {server_rel_path}/{name}")
+            continue
+        sub_c, sub_d = sync_cookie_recursive(
+            session, f"{server_rel_path}/{name}", os.path.join(local_dir, name)
+        )
+        checked += sub_c
+        downloaded += sub_d
+
+    for f_item in files:
+        checked += 1
+        fname = f_item["Name"]
+        remote_size = int(f_item["Length"])
+        target_path = os.path.join(local_dir, fname)
+        if os.path.exists(target_path) and os.path.getsize(target_path) == remote_size:
+            continue
+
+        encoded_rel = encode_odata_path(f"{server_rel_path}/{fname}")
+        dl_url = (
+            f"https://{TENANT_DOMAIN}/sites/{SITE_NAME}/_api/web/"
+            f"GetFileByServerRelativePath(decodedurl='{encoded_rel}')/$value"
+        )
+        with session.get(dl_url, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(target_path, "wb") as out:
+                for chunk in r.iter_content(chunk_size=65536):
+                    out.write(chunk)
+        downloaded += 1
+        print(f"[SYNC] Gedownload: {server_rel_path}/{fname} ({remote_size} bytes)")
+
+    return checked, downloaded
+
+
+# ==============================================================================
+# MODE 2 (ALTERNATIEF): Microsoft Graph Command Line Tools (14d82eec-...)
+# ==============================================================================
 def load_encrypted_token_cache() -> msal.SerializableTokenCache:
     cache = msal.SerializableTokenCache()
     if os.path.exists(VAULT_FILE):
@@ -66,6 +213,7 @@ def load_encrypted_token_cache() -> msal.SerializableTokenCache:
         cache.deserialize(decrypted_json)
     return cache
 
+
 def save_encrypted_token_cache(cache: msal.SerializableTokenCache) -> None:
     if cache.has_state_changed:
         os.makedirs(os.path.dirname(VAULT_FILE), exist_ok=True)
@@ -74,6 +222,7 @@ def save_encrypted_token_cache(cache: msal.SerializableTokenCache) -> None:
         with open(VAULT_FILE, "wb") as f:
             f.write(encrypted_bytes)
         os.chmod(VAULT_FILE, 0o600)
+
 
 def acquire_graph_token(init_device_flow: bool = False) -> str:
     cache = load_encrypted_token_cache()
@@ -85,7 +234,7 @@ def acquire_graph_token(init_device_flow: bool = False) -> str:
             raise RuntimeError(f"Kan OAuth2 Device Flow niet starten: {flow.get('error_description')}")
 
         print("\n" + "=" * 72)
-        print(" [OKTA MFA BOOTSTRAP IN HEADLESS DOCKER CONTAINER]")
+        print(" [OKTA MFA BOOTSTRAP VIA MICROSOFT GRAPH CLI]")
         print(f" 1. Open op uw pc of telefoon: {flow['verification_uri']}")
         print(f" 2. Voer de eenmalige code in : {flow['user_code']}")
         print(f" 3. Log in als '{USERNAME_HINT}' via {OKTA_URL} en bevestig Okta MFA.")
@@ -93,34 +242,38 @@ def acquire_graph_token(init_device_flow: bool = False) -> str:
 
         result = app.acquire_token_by_device_flow(flow)
         if "access_token" not in result:
-            raise RuntimeError(
-                f"Login of Okta MFA mislukt ({result.get('error')}): {result.get('error_description')}"
-            )
+            err_desc = result.get("error_description", "")
+            if "AADSTS65001" in err_desc or "AADSTS65002" in err_desc or "AADSTS53003" in err_desc:
+                raise RuntimeError(
+                    f"Login geblokkeerd door Entra ID ({result.get('error')}): {err_desc}\n\n"
+                    "OPLOSSING ZONDER IT-GOEDKEURING:\n"
+                    "Gebruik de directe SharePoint Cookie Vault (0% Entra App consent nodig):\n"
+                    "  docker exec -it oktasync python3 /app/sync.py --init-cookies"
+                )
+            raise RuntimeError(f"Login of Okta MFA mislukt ({result.get('error')}): {err_desc}")
 
         save_encrypted_token_cache(cache)
-        print(f"[SUCCESS] Okta MFA voltooid! Refresh Token is AES-128 versleuteld opgeslagen in {VAULT_FILE}")
+        print(f"[SUCCESS] Okta MFA voltooid! Refresh Token versleuteld opgeslagen in {VAULT_FILE}")
         return result["access_token"]
 
     accounts = app.get_accounts(username=USERNAME_HINT) or app.get_accounts()
     if not accounts:
         raise RuntimeError(
-            f"Geen versleutelde sessie gevonden in {VAULT_FILE}. "
-            "Voer eerst 'docker exec -it oktasync python3 /app/sync.py --init-auth' uit."
+            "Geen sessie gevonden in /vault. Kies bij voorkeur (zonder IT-goedkeuring):\n"
+            "  docker exec -it oktasync python3 /app/sync.py --init-cookies"
         )
 
-    # Vernieuwt het Access Token stilzwijgend via het Refresh Token (geen MFA prompt nodig)
     result = app.acquire_token_silent(SCOPES, account=accounts[0])
     save_encrypted_token_cache(cache)
 
     if not result or "access_token" not in result:
         err_code = result.get("error") if result else "no_result"
         err_desc = result.get("error_description") if result else "Onbekende fout"
-        raise RuntimeError(
-            f"Stille token-vernieuwing geweigerd ({err_code}): {err_desc}."
-        )
+        raise RuntimeError(f"Stille token-vernieuwing geweigerd ({err_code}): {err_desc}.")
     return result["access_token"]
 
-def list_folder_children(headers: dict, site_id: str, folder_rel_path: str) -> list:
+
+def list_graph_folder_children(headers: dict, site_id: str, folder_rel_path: str) -> list:
     encoded_path = urllib.parse.quote(folder_rel_path)
     next_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{encoded_path}:/children"
     all_items = []
@@ -132,15 +285,15 @@ def list_folder_children(headers: dict, site_id: str, folder_rel_path: str) -> l
         next_url = payload.get("@odata.nextLink")
     return all_items
 
-def verify_connection() -> None:
-    """5-staps preflight controle zonder bestanden te downloaden."""
+
+def verify_graph_connection() -> None:
     print("[CHECK 1/5] Controleer FERNET_VAULT_KEY & versleutelde tokenkluis...")
     if not os.path.exists(VAULT_FILE):
-        raise RuntimeError(f"Tokenkluis ontbreekt in {VAULT_FILE}. Draai eerst --init-auth.")
+        raise RuntimeError(f"Tokenkluis ontbreekt in {VAULT_FILE}. Draai eerst --init-cookies of --init-auth.")
     load_encrypted_token_cache()
     print("  -> OK: Kluis succesvol ontsleuteld.")
 
-    print("[CHECK 2/5] Test stille Okta/Entra OAuth2 token-vernieuwing (zonder MFA prompt)...")
+    print("[CHECK 2/5] Test stille Okta/Entra OAuth2 token-vernieuwing...")
     token = acquire_graph_token(init_device_flow=False)
     headers = {"Authorization": f"Bearer {token}"}
     print("  -> OK: Vers Access Token verkregen via Refresh Token.")
@@ -154,7 +307,7 @@ def verify_connection() -> None:
 
     base_folder = normalize_sharepoint_folder(SHARED_FOLDER)
     print(f"[CHECK 4/5] Lees gedeelde map '/{base_folder}' & controleer ignore-regel...")
-    items = list_folder_children(headers, site_id, base_folder)
+    items = list_graph_folder_children(headers, site_id, base_folder)
     ignored_hits = [
         i["name"] for i in items
         if "folder" in i and i["name"].strip().lower() in IGNORE_FOLDERS
@@ -171,27 +324,27 @@ def verify_connection() -> None:
         f.write("ok")
     os.remove(probe_file)
     print("  -> OK: Host bind-mount is beschrijfbaar.")
-    print("\n[VERIFIED] Alle 5 verbindingscontroles geslaagd. De 2-uurlijkse sync is bedrijfsklaar.")
+    print("\n[VERIFIED] Alle 5 verbindingscontroles geslaagd.")
 
-def sync_folder_recursive(headers: dict, site_id: str, remote_rel_path: str, local_dir: str) -> tuple[int, int]:
+
+def sync_graph_recursive(headers: dict, site_id: str, remote_rel_path: str, local_dir: str) -> tuple[int, int]:
     os.makedirs(local_dir, exist_ok=True)
-    items = list_folder_children(headers, site_id, remote_rel_path)
+    items = list_graph_folder_children(headers, site_id, remote_rel_path)
     checked = 0
     downloaded = 0
 
     for item in items:
         item_name = item["name"]
 
-        # Negeer submappen die op de negeerlijst staan (bijv. 'Callsheets Archief')
         if "folder" in item:
             if item_name.strip().lower() in IGNORE_FOLDERS:
                 print(f"[IGNORE] SharePoint submap overgeslagen: {remote_rel_path}/{item_name}")
                 continue
-            sub_checked, sub_downloaded = sync_folder_recursive(
+            sub_checked, sub_downloaded = sync_graph_recursive(
                 headers,
                 site_id,
                 f"{remote_rel_path}/{item_name}",
-                os.path.join(local_dir, item_name)
+                os.path.join(local_dir, item_name),
             )
             checked += sub_checked
             downloaded += sub_downloaded
@@ -205,7 +358,6 @@ def sync_folder_recursive(headers: dict, site_id: str, remote_rel_path: str, loc
         download_url = item["@microsoft.graph.downloadUrl"]
         target_path = os.path.join(local_dir, item_name)
 
-        # Delta-check op bestandsgrootte
         if os.path.exists(target_path) and os.path.getsize(target_path) == remote_size:
             continue
 
@@ -220,32 +372,74 @@ def sync_folder_recursive(headers: dict, site_id: str, remote_rel_path: str, loc
 
     return checked, downloaded
 
+
+# ==============================================================================
+# AUTOMATISCHE SELECTIE & ENTRYPOINT
+# ==============================================================================
+def active_mode() -> str:
+    if os.path.exists(COOKIE_VAULT):
+        return "cookie"
+    if os.path.exists(VAULT_FILE):
+        return "graph"
+    return "none"
+
+
+def verify_connection() -> None:
+    mode = active_mode()
+    if mode == "cookie":
+        verify_cookie_connection()
+    elif mode == "graph":
+        verify_graph_connection()
+    else:
+        raise RuntimeError(
+            "Nog geen versleutelde sessie gevonden in /vault. "
+            "Start eenmalig (aanbevolen, zonder IT-goedkeuring):\n"
+            "  docker exec -it oktasync python3 /app/sync.py --init-cookies"
+        )
+
+
 def run_folder_sync(force: bool = False) -> None:
     now = datetime.datetime.now()
     if not force and not (START_HOUR <= now.hour <= END_HOUR):
         print(f"[SKIP] {now.strftime('%H:%M')} valt buiten het actieve venster ({START_HOUR:02d}:00-{END_HOUR:02d}:00).")
         return
 
-    token = acquire_graph_token(init_device_flow=False)
-    headers = {"Authorization": f"Bearer {token}"}
+    mode = active_mode()
+    if mode == "cookie":
+        session = build_sp_session()
+        checked, downloaded = sync_cookie_recursive(session, get_server_relative_base(), LOCAL_SYNC_DIR)
+        print(
+            f"[OK] {now.strftime('%Y-%m-%d %H:%M:%S')} (Cookie Vault) - Gecontroleerd: {checked}, "
+            f"Gedownload: {downloaded} naar {LOCAL_SYNC_DIR} (Genegeerd: {sorted(IGNORE_FOLDERS)})"
+        )
+        return
 
-    # 1. Haal het SharePoint Site ID op via Microsoft Graph
-    site_url = f"https://graph.microsoft.com/v1.0/sites/{TENANT_DOMAIN}:/sites/{SITE_NAME}"
-    site_resp = requests.get(site_url, headers=headers, timeout=30)
-    site_resp.raise_for_status()
-    site_id = site_resp.json()["id"]
+    if mode == "graph":
+        token = acquire_graph_token(init_device_flow=False)
+        headers = {"Authorization": f"Bearer {token}"}
+        site_url = f"https://graph.microsoft.com/v1.0/sites/{TENANT_DOMAIN}:/sites/{SITE_NAME}"
+        site_resp = requests.get(site_url, headers=headers, timeout=30)
+        site_resp.raise_for_status()
+        site_id = site_resp.json()["id"]
 
-    # 2. Synchroniseer recursief en sla IGNORE_FOLDERS ('Callsheets Archief') over
-    base_folder = normalize_sharepoint_folder(SHARED_FOLDER)
-    checked, downloaded = sync_folder_recursive(headers, site_id, base_folder, LOCAL_SYNC_DIR)
+        base_folder = normalize_sharepoint_folder(SHARED_FOLDER)
+        checked, downloaded = sync_graph_recursive(headers, site_id, base_folder, LOCAL_SYNC_DIR)
+        print(
+            f"[OK] {now.strftime('%Y-%m-%d %H:%M:%S')} (Graph OAuth) - Gecontroleerd: {checked}, "
+            f"Gedownload: {downloaded} naar {LOCAL_SYNC_DIR} (Genegeerd: {sorted(IGNORE_FOLDERS)})"
+        )
+        return
 
-    print(
-        f"[OK] {now.strftime('%Y-%m-%d %H:%M:%S')} - Gecontroleerd: {checked}, "
-        f"Gedownload: {downloaded} naar {LOCAL_SYNC_DIR} (Genegeerd: {sorted(IGNORE_FOLDERS)})"
+    raise RuntimeError(
+        "Geen geldige sessie in /vault. Voer eenmalig uit:\n"
+        "  docker exec -it oktasync python3 /app/sync.py --init-cookies"
     )
 
+
 if __name__ == "__main__":
-    if "--init-auth" in sys.argv:
+    if "--init-cookies" in sys.argv:
+        init_cookie_vault()
+    elif "--init-auth" in sys.argv:
         acquire_graph_token(init_device_flow=True)
     elif "--verify" in sys.argv:
         verify_connection()

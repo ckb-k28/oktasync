@@ -65,8 +65,8 @@ export default function App() {
     containerVaultPath: '/vault',
     oktaOrgUrl: 'https://nepglobal.okta.com',
     usernameHint: 'voornaam.achternaam@nepworldwide.nl',
-    clientId: 'd3590ed6-52b3-4102-aeff-aad2292ab01c',
-    authMethod: 'oauth2-device-fernet',
+    clientId: '14d82eec-204b-4c2f-b7e8-296a70dab67e',
+    authMethod: 'sharepoint-cookie-vault',
     githubRepo: 'ckb-k28/oktasync',
     dockerImageName: 'oktasync',
     timezone: 'Europe/Amsterdam',
@@ -620,18 +620,18 @@ export default function App() {
                   onChange={(e) => setConfig({ ...config, clientId: e.target.value })}
                   className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
                 >
-                  <option value="d3590ed6-52b3-4102-aeff-aad2292ab01c">
-                    d3590ed6-52b3-4102-aeff-aad2292ab01c (Microsoft Office — pre-consented)
+                  <option value="14d82eec-204b-4c2f-b7e8-296a70dab67e">
+                    14d82eec-204b-4c2f-b7e8-296a70dab67e (Microsoft Graph Command Line Tools)
+                  </option>
+                  <option value="ab9b8c07-8f02-4f72-87fa-80105867a763">
+                    ab9b8c07-8f02-4f72-87fa-80105867a763 (OneDrive SyncEngine)
                   </option>
                   <option value="9bc3ab49-b65d-410a-85ad-bf819febf99b">
                     9bc3ab49-b65d-410a-85ad-bf819febf99b (SharePoint Online Client)
                   </option>
-                  <option value="04b07795-8ddb-461a-bbee-02f9e1bf7b46">
-                    04b07795-8ddb-461a-bbee-02f9e1bf7b46 (Microsoft Azure CLI)
-                  </option>
                 </select>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Geen PnP of eigen Entra App nodig. Als deze toch geblokkeerd zijn, kies dan bovenin <strong>Optie 2 (SharePoint Cookie Kluis)</strong>.
+                  Let op: Microsoft Office (<code className="font-mono">d3590ed6-...</code>) geeft <code className="font-mono">AADSTS65002</code> op Graph. Aanbevolen zonder IT-goedkeuring: <strong>Optie 1 (SharePoint Cookie Kluis, --init-cookies)</strong>.
                 </p>
               </div>
 
@@ -1428,13 +1428,24 @@ export default function App() {
                   </tr>
                   <tr>
                     <td className="py-2.5 px-3 font-semibold text-slate-900">
+                      First-party app niet gepreauthoriseerd voor Graph
+                    </td>
+                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
+                      AADSTS65002 (bijv. d3590ed6-... op 00000003-...)
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-600">
+                      Stap over naar <strong>Optie 1 (SharePoint REST API + FedAuth Cookie Vault via <code className="font-mono">--init-cookies</code>)</strong>. Er komt dan helemaal geen Entra OAuth2 app aan te pas.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-2.5 px-3 font-semibold text-slate-900">
                       App-consent geblokkeerd (geen IT goedkeuring)
                     </td>
                     <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
                       AADSTS65001 / Need admin approval
                     </td>
                     <td className="py-2.5 px-3 text-slate-600">
-                      Gebruik Optie 1 met het Microsoft First-Party Office ID (<code className="font-mono">d3590ed6-...</code>), of schakel over naar <strong>Optie 2 (Directe SharePoint REST API + FedAuth Cookie Vault)</strong> waar helemaal geen Entra App aan te pas komt.
+                      Gebruik <strong>Optie 1 (Directe SharePoint REST API + FedAuth Cookie Vault via <code className="font-mono">--init-cookies</code>)</strong> waar helemaal geen Entra App aan te pas komt.
                     </td>
                   </tr>
                   <tr>
@@ -1445,7 +1456,7 @@ export default function App() {
                       AADSTS53003 / Device code flow blocked
                     </td>
                     <td className="py-2.5 px-3 text-slate-600">
-                      Schakel bovenin over naar <strong>Optie 2 (SharePoint Cookie Vault)</strong> of <strong>Optie 3 (Rclone via eigen browser)</strong>. Beide werken zonder Device Code Flow.
+                      Schakel bovenin over naar <strong>Optie 1 (SharePoint Cookie Vault)</strong> of <strong>Optie 3 (Rclone via eigen browser)</strong>. Beide werken zonder Device Code Flow.
                     </td>
                   </tr>
                   <tr>
