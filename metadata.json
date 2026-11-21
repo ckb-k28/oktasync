@@ -1,0 +1,6 @@
+{
+  "name": "O365 Okta Sync Studio",
+  "description": "Configuratie- en simulatieplatform voor veilige 2-uurlijkse synchronisatie (08:00–20:00) van gedeelde Microsoft 365 / SharePoint mappen met Okta MFA in een lokaal gehoste Docker container via GitHub Actions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
