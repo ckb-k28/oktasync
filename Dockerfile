@@ -6,7 +6,7 @@ FROM --platform=linux/amd64 node:22-bookworm-slim AS web-builder
 
 WORKDIR /web
 COPY package.json ./
-RUN npm install --no-audit --no-fund
+RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src

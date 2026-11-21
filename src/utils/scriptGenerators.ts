@@ -39,13 +39,13 @@ jobs:
 
     steps:
       - name: Checkout GitHub Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in op GitHub Container Registry (GHCR)
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: \${{ env.REGISTRY }}
           username: \${{ github.actor }}
@@ -53,7 +53,7 @@ jobs:
 
       - name: Extract Docker Metadata & Tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: \${{ env.REGISTRY }}/\${{ env.IMAGE_NAME }}
           tags: |
@@ -62,7 +62,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build en Push Docker Image (linux/amd64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -83,7 +83,7 @@ FROM --platform=linux/amd64 node:22-bookworm-slim AS web-builder
 
 WORKDIR /web
 COPY package.json ./
-RUN npm install --no-audit --no-fund
+RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
