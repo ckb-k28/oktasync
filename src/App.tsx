@@ -804,10 +804,10 @@ export default function App() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
-                  01. GitHub Repository & Lokale Docker Host Bestanden
+                  01. GitHub Repository & Lokale Docker Host Bestanden (linux/amd64)
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Plaats deze 5 bestanden in uw GitHub repository. GitHub Actions bouwt het Docker image dat u lokaal start met <code className="font-mono">docker compose up -d</code>.
+                  Belangrijk voor GitHub Actions: plaats <code className="font-mono text-slate-800">.github/workflows/docker-publish.yml</code> exact in de verborgen map <code className="font-mono text-slate-800">.github/workflows/</code> (met punt ervoor) en de overige bestanden in de root van <code className="font-mono text-slate-800">{config.githubRepo}</code>.
                 </p>
               </div>
 

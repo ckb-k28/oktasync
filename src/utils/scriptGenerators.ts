@@ -15,14 +15,11 @@ export function buildCronExpression(startHour: number, endHour: number, interval
 }
 
 export function generateGithubWorkflowYaml(config: SyncConfig): string {
-  return `name: Build & Push O365 Okta Sync Docker Image
+  return `# Sla dit bestand op als EXACT: .github/workflows/docker-publish.yml
+name: Build & Push O365 Okta Sync Docker Image (amd64)
 
 on:
   push:
-    branches: [ "main", "master" ]
-    tags: [ "v*.*.*" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 env:
@@ -40,14 +37,10 @@ jobs:
       - name: Checkout GitHub Repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU voor Multi-Arch Builds (amd64 / arm64)
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in op GitHub Container Registry (GHCR)
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: \${{ env.REGISTRY }}
@@ -61,16 +54,15 @@ jobs:
           images: \${{ env.REGISTRY }}/\${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=semver,pattern={{version}}
             type=sha,prefix=sha-
             type=raw,value=latest
 
-      - name: Build en Push Docker Image
+      - name: Build en Push Docker Image (linux/amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: \${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64
+          push: true
           tags: \${{ steps.meta.outputs.tags }}
           labels: \${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -80,12 +72,10 @@ jobs:
 
 export function generateDockerfile(config: SyncConfig): string {
   return `# ==============================================================================
-# Dockerfile - Headless O365 + Okta MFA Synchronisatie Container
+# Dockerfile (linux/amd64) - Headless O365 + Okta MFA Synchronisatie Container
 # Gebouwd via GitHub Actions -> Gehost op lokale Docker omgeving
 # ==============================================================================
-FROM python:3.12-slim-bookworm
-
-ARG TARGETARCH=amd64
+FROM --platform=linux/amd64 python:3.12-slim-bookworm
 
 # Installeer tijdzone-data, ca-certificates en Supercronic (non-root cron runner voor Docker)
 ENV DEBIAN_FRONTEND=noninteractive \\
@@ -99,16 +89,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     tzdata \\
     && rm -rf /var/lib/apt/lists/*
 
-# Installeer Supercronic voor juiste architectuur (amd64 of arm64)
-RUN if [ "\${TARGETARCH}" = "arm64" ]; then \\
-      SUPERCRONIC_URL="https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-linux-arm64"; \\
-      SUPERCRONIC_SHA1="5ab99535437c6d752fd96d27a78e8d3d4a965973"; \\
-    else \\
-      SUPERCRONIC_URL="https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-linux-amd64"; \\
-      SUPERCRONIC_SHA1="cd48d45c4b10f3f0bfdd3a57d054cd05ac96812b"; \\
-    fi \\
-    && curl -fsSL "\${SUPERCRONIC_URL}" -o /usr/local/bin/supercronic \\
-    && echo "\${SUPERCRONIC_SHA1}  /usr/local/bin/supercronic" | sha1sum -c - \\
+# Installeer Supercronic (linux/amd64)
+ENV SUPERCRONIC_URL=https://github.com/aptible/supercronic/releases/download/v0.2.29/supercronic-linux-amd64 \\
+    SUPERCRONIC_SHA1SUM=cd48d45c4b10f3f0bfdd3a57d054cd05ac96812b
+
+RUN curl -fsSL "\${SUPERCRONIC_URL}" -o /usr/local/bin/supercronic \\
+    && echo "\${SUPERCRONIC_SHA1SUM}  /usr/local/bin/supercronic" | sha1sum -c - \\
     && chmod +x /usr/local/bin/supercronic
 
 # Maak onbevoegde container-gebruiker aan (UID 1000 zodat lokale volume-rechten kloppen)
