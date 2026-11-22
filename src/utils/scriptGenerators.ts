@@ -22,8 +22,6 @@ on:
   push:
     branches:
       - "**"
-    tags:
-      - "*"
   workflow_dispatch:
 
 env:
@@ -34,12 +32,28 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - name: Checkout GitHub Repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Bepaal volgend versienummer (start bij v.01)
+        id: version
+        run: |
+          git fetch --tags --force
+          LAST_NUM=$(git tag -l 'v.[0-9]*' | sed -E 's/^v\\.0*([0-9]+)$/\\1/' | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
+          if [ -z "$LAST_NUM" ]; then
+            NEXT_NUM=1
+          else
+            NEXT_NUM=$((LAST_NUM + 1))
+          fi
+          NEXT_VERSION=$(printf "v.%02d" "$NEXT_NUM")
+          echo "version=\${NEXT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Toegewezen release-versie: \${NEXT_VERSION}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -57,6 +71,7 @@ jobs:
         with:
           images: \${{ env.REGISTRY }}/\${{ env.IMAGE_NAME }}
           tags: |
+            type=raw,value=\${{ steps.version.outputs.version }}
             type=ref,event=branch
             type=sha,prefix=sha-
             type=raw,value=latest
@@ -67,10 +82,19 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          build-args: |
+            APP_VERSION=\${{ steps.version.outputs.version }}
           tags: \${{ steps.meta.outputs.tags }}
           labels: \${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Push Git Versie-tag (\${{ steps.version.outputs.version }})
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "\${{ steps.version.outputs.version }}" -m "Release \${{ steps.version.outputs.version }}"
+          git push origin "\${{ steps.version.outputs.version }}"
 `;
 }
 
@@ -87,15 +111,20 @@ RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
+ARG APP_VERSION=v.01
+ENV VITE_APP_VERSION=\${APP_VERSION}
 RUN npm run build
 
 FROM --platform=linux/amd64 python:3.12-slim-bookworm
+
+ARG APP_VERSION=v.01
 
 # Installeer tijdzone-data, ca-certificates en Supercronic (non-root cron runner voor Docker)
 ENV DEBIAN_FRONTEND=noninteractive \\
     TZ=${config.timezone} \\
     PYTHONUNBUFFERED=1 \\
     PYTHONDONTWRITEBYTECODE=1 \\
+    APP_VERSION=\${APP_VERSION} \\
     WEB_PORT=5555 \\
     WEB_DIST_DIR=/app/dist
 
@@ -113,9 +142,6 @@ RUN curl -fsSL "\${SUPERCRONIC_URL}" -o /usr/local/bin/supercronic \\
     && echo "\${SUPERCRONIC_SHA1SUM}  /usr/local/bin/supercronic" | sha1sum -c - \\
     && chmod +x /usr/local/bin/supercronic
 
-# Maak onbevoegde container-gebruiker aan (UID 1000 zodat lokale volume-rechten kloppen)
-RUN groupadd -g 1000 syncgroup && useradd -u 1000 -g syncgroup -m -s /bin/bash syncuser
-
 WORKDIR /app
 
 # Installeer Python dependencies (MSAL voor Okta/Entra OAuth2, Cryptography voor Fernet AES-128 kluis)
@@ -125,17 +151,15 @@ RUN pip install --no-cache-dir \\
     requests==2.32.3
 
 # Kopieer gebouwde webapplicatie en Python sync-bestanden
-COPY --from=web-builder --chown=syncuser:syncgroup /web/dist /app/dist
-COPY --chown=syncuser:syncgroup sync.py /app/sync.py
-COPY --chown=syncuser:syncgroup web_server.py /app/web_server.py
-COPY --chown=syncuser:syncgroup entrypoint.sh /app/entrypoint.sh
+COPY --from=web-builder /web/dist /app/dist
+COPY VERSION /app/VERSION
+COPY sync.py /app/sync.py
+COPY web_server.py /app/web_server.py
+COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/sync.py /app/web_server.py /app/entrypoint.sh
 
 # Maak mountpoints aan voor lokale doelmap (/data/sync) en versleutelde tokenkluis (/vault)
-RUN mkdir -p ${config.containerDataPath} ${config.containerVaultPath} \\
-    && chown -R syncuser:syncgroup ${config.containerDataPath} ${config.containerVaultPath} /app
-
-USER syncuser
+RUN mkdir -p ${config.containerDataPath} ${config.containerVaultPath}
 
 EXPOSE 5555
 
@@ -185,9 +209,9 @@ services:
       - START_HOUR=${config.startHour}
       - END_HOUR=${config.endHour}
     volumes:
-      # 1. Lokale map op uw host (/opt/docker/callsheets/*) waar de gedeelde O365 bestanden in komen:
+      # 1. Lokale map op uw host (/opt/docker/callsheets/data) waar de gedeelde O365 bestanden in komen:
       - ${config.hostSyncVolumePath}:${config.containerDataPath}:rw
-      # 2. Persistente versleutelde opslag voor het Okta/O365 OAuth2 Refresh Token:
+      # 2. Persistente versleutelde opslag (/opt/docker/callsheets/vault) voor de Okta/O365 sessiekluis:
       - ${config.hostVaultVolumePath}:${config.containerVaultPath}:rw
     logging:
       driver: "json-file"
@@ -219,7 +243,7 @@ CRON_SCHEDULE="\${SYNC_CRON_SCHEDULE:-${defaultCron}}"
 CRONTAB_FILE="/tmp/o365_sync_crontab"
 
 echo "=================================================================="
-echo " O365 + Okta MFA Docker Sync Container Gestart"
+echo " O365 + Okta MFA Docker Sync Container Gestart (\${APP_VERSION:-v.01})"
 echo " Tijdzone       : \${TZ:-${config.timezone}}"
 echo " Web UI Poort   : http://0.0.0.0:\${WEB_PORT:-5555}"
 echo " Cron Schema    : \${CRON_SCHEDULE} (Elke ${config.intervalHours}u tussen ${String(config.startHour).padStart(2, '0')}:00 en ${String(config.endHour).padStart(2, '0')}:00)"
@@ -727,6 +751,21 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 WEB_PORT = int(os.environ.get("WEB_PORT", "5555"))
 DIST_DIR = os.environ.get("WEB_DIST_DIR", "/app/dist")
 VAULT_FILE = os.environ.get("TOKEN_VAULT_FILE", "${config.containerVaultPath}/token_cache.enc")
+COOKIE_VAULT = os.environ.get("COOKIE_VAULT_FILE", "${config.containerVaultPath}/sp_cookies.enc")
+
+
+def get_app_version() -> str:
+    env_ver = os.environ.get("APP_VERSION", "").strip()
+    if env_ver:
+        return env_ver
+    version_file = "/app/VERSION"
+    if os.path.isfile(version_file):
+        with open(version_file, "r", encoding="utf-8") as f:
+            return f.read().strip() or "v.01"
+    return "v.01"
+
+
+APP_VERSION = get_app_version()
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -740,8 +779,9 @@ class SpaRequestHandler(SimpleHTTPRequestHandler):
         if clean_path == "/api/health":
             payload = {
                 "status": "ok",
+                "version": APP_VERSION,
                 "port": WEB_PORT,
-                "vault_present": os.path.exists(VAULT_FILE),
+                "vault_present": os.path.exists(COOKIE_VAULT) or os.path.exists(VAULT_FILE),
                 "cron_schedule": os.environ.get("SYNC_CRON_SCHEDULE", "${buildCronExpression(config.startHour, config.endHour, config.intervalHours, config.weekdaysOnly)}"),
                 "shared_folder": os.environ.get("O365_SHARED_FOLDER", "${config.sharedFolderPath}"),
                 "ignored_folders": os.environ.get("O365_IGNORE_FOLDERS", "${config.ignoredFolders.join(',')}"),
@@ -830,14 +870,18 @@ cat << 'EOF_SYNC_PY' > sync.py
 ${syncPy.trimEnd()}
 EOF_SYNC_PY
 
+cat << 'EOF_VERSION' > VERSION
+v.01
+EOF_VERSION
+
 cat << 'EOF_WEB_SERVER' > web_server.py
 ${webServerPy.trimEnd()}
 EOF_WEB_SERVER
 
 chmod +x entrypoint.sh sync.py web_server.py
 
-git add .github/workflows/docker-publish.yml Dockerfile docker-compose.yml entrypoint.sh sync.py web_server.py
-git commit -m "Configureer O365 Okta Sync Docker build (amd64, poort 5555) & GitHub Action"
+git add .github/workflows/docker-publish.yml VERSION Dockerfile docker-compose.yml entrypoint.sh sync.py web_server.py
+git commit -m "Configureer O365 Okta Sync Docker build (amd64, poort 5555, auto-versioning) & GitHub Action"
 git push
 
 echo "Klaar! Open https://github.com/${config.githubRepo}/actions om de gestarte build te volgen."

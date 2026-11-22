@@ -27,6 +27,7 @@ import msal
 import requests
 from cryptography.fernet import Fernet
 
+APP_VERSION     = os.environ.get("APP_VERSION", "v.01")
 TENANT_DOMAIN   = os.environ.get("O365_TENANT_DOMAIN", "nepinc.sharepoint.com")
 AUTH_AUTHORITY  = os.environ.get("O365_AUTHORITY", "https://login.microsoftonline.com/organizations")
 SITE_NAME       = os.environ.get("O365_SITE_NAME", "NEPNL-Operations")
@@ -95,9 +96,16 @@ def init_cookie_vault() -> None:
     os.makedirs(os.path.dirname(COOKIE_VAULT), exist_ok=True)
     payload = json.dumps({"FedAuth": fed_auth, "rtFa": rt_fa}).encode("utf-8")
     encrypted = get_cipher().encrypt(payload)
-    with open(COOKIE_VAULT, "wb") as f:
-        f.write(encrypted)
-    os.chmod(COOKIE_VAULT, 0o600)
+    try:
+        with open(COOKIE_VAULT, "wb") as f:
+            f.write(encrypted)
+        os.chmod(COOKIE_VAULT, 0o600)
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"Geen schrijfrechten op {COOKIE_VAULT}. "
+            "Voer op de Docker host uit: chown -R 1000:1000 /opt/docker/callsheets/data /opt/docker/callsheets/vault "
+            "of update naar de nieuwste Docker image (docker compose pull && docker compose up -d)."
+        ) from exc
     print(f"[SUCCESS] Okta/SharePoint cookies AES-128 versleuteld opgeslagen in {COOKIE_VAULT}")
 
 

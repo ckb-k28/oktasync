@@ -10,15 +10,20 @@ RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
+ARG APP_VERSION=v.01
+ENV VITE_APP_VERSION=${APP_VERSION}
 RUN npm run build
 
 FROM --platform=linux/amd64 python:3.12-slim-bookworm
+
+ARG APP_VERSION=v.01
 
 # Installeer tijdzone-data, ca-certificates en Supercronic (non-root cron runner voor Docker)
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Europe/Amsterdam \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    APP_VERSION=${APP_VERSION} \
     WEB_PORT=5555 \
     WEB_DIST_DIR=/app/dist
 
@@ -36,9 +41,6 @@ RUN curl -fsSL "${SUPERCRONIC_URL}" -o /usr/local/bin/supercronic \
     && echo "${SUPERCRONIC_SHA1SUM}  /usr/local/bin/supercronic" | sha1sum -c - \
     && chmod +x /usr/local/bin/supercronic
 
-# Maak onbevoegde container-gebruiker aan (UID 1000 zodat lokale volume-rechten kloppen)
-RUN groupadd -g 1000 syncgroup && useradd -u 1000 -g syncgroup -m -s /bin/bash syncuser
-
 WORKDIR /app
 
 # Installeer Python dependencies (MSAL voor Okta/Entra OAuth2, Cryptography voor Fernet AES-128 kluis)
@@ -48,17 +50,15 @@ RUN pip install --no-cache-dir \
     requests==2.32.3
 
 # Kopieer gebouwde webapplicatie en Python sync-bestanden
-COPY --from=web-builder --chown=syncuser:syncgroup /web/dist /app/dist
-COPY --chown=syncuser:syncgroup sync.py /app/sync.py
-COPY --chown=syncuser:syncgroup web_server.py /app/web_server.py
-COPY --chown=syncuser:syncgroup entrypoint.sh /app/entrypoint.sh
+COPY --from=web-builder /web/dist /app/dist
+COPY VERSION /app/VERSION
+COPY sync.py /app/sync.py
+COPY web_server.py /app/web_server.py
+COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/sync.py /app/web_server.py /app/entrypoint.sh
 
 # Maak mountpoints aan voor lokale doelmap (/data/sync) en versleutelde tokenkluis (/vault)
-RUN mkdir -p /data/sync /vault \
-    && chown -R syncuser:syncgroup /data/sync /vault /app
-
-USER syncuser
+RUN mkdir -p /data/sync /vault
 
 EXPOSE 5555
 

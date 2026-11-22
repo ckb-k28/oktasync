@@ -34,10 +34,10 @@ services:
       - START_HOUR=8
       - END_HOUR=20
     volumes:
-      # 1. Lokale map op uw host (/opt/docker/callsheets/*) waar de gedeelde O365 bestanden in komen:
-      - /opt/docker/callsheets:/data/sync:rw
-      # 2. Persistente versleutelde opslag voor het Okta/O365 OAuth2 Refresh Token:
-      - /opt/docker/callsheets-vault:/vault:rw
+      # 1. Lokale map op uw host (/opt/docker/callsheets/data) waar de gedeelde O365 bestanden in komen:
+      - /opt/docker/callsheets/data:/data/sync:rw
+      # 2. Persistente versleutelde opslag (/opt/docker/callsheets/vault) voor de Okta/O365 sessiekluis:
+      - /opt/docker/callsheets/vault:/vault:rw
     logging:
       driver: "json-file"
       options:

@@ -12,6 +12,21 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 WEB_PORT = int(os.environ.get("WEB_PORT", "5555"))
 DIST_DIR = os.environ.get("WEB_DIST_DIR", "/app/dist")
 VAULT_FILE = os.environ.get("TOKEN_VAULT_FILE", "/vault/token_cache.enc")
+COOKIE_VAULT = os.environ.get("COOKIE_VAULT_FILE", "/vault/sp_cookies.enc")
+
+
+def get_app_version() -> str:
+    env_ver = os.environ.get("APP_VERSION", "").strip()
+    if env_ver:
+        return env_ver
+    version_file = "/app/VERSION"
+    if os.path.isfile(version_file):
+        with open(version_file, "r", encoding="utf-8") as f:
+            return f.read().strip() or "v.01"
+    return "v.01"
+
+
+APP_VERSION = get_app_version()
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -25,8 +40,9 @@ class SpaRequestHandler(SimpleHTTPRequestHandler):
         if clean_path == "/api/health":
             payload = {
                 "status": "ok",
+                "version": APP_VERSION,
                 "port": WEB_PORT,
-                "vault_present": os.path.exists(VAULT_FILE),
+                "vault_present": os.path.exists(COOKIE_VAULT) or os.path.exists(VAULT_FILE),
                 "cron_schedule": os.environ.get("SYNC_CRON_SCHEDULE", "0 8-20/2 * * *"),
                 "shared_folder": os.environ.get("O365_SHARED_FOLDER", "/02. Callsheets"),
                 "ignored_folders": os.environ.get("O365_IGNORE_FOLDERS", "Callsheets Archief"),

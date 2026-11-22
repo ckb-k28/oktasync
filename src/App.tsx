@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ShieldCheck,
   Clock,
@@ -7,16 +7,15 @@ import {
   Check,
   Download,
   Play,
-  KeyRound,
   Lock,
   FileText,
   RefreshCw,
   Plus,
   Search,
   SlidersHorizontal,
-  Container,
   FolderX,
-  Trash2
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import {
   SyncConfig,
@@ -38,8 +37,8 @@ import {
   generateRepoBootstrapScript
 } from './utils/scriptGenerators';
 
-type ActiveSection = 'overzicht' | 'authenticatie' | 'planning' | 'scripts' | 'simulatie';
-type ScriptTab = 'dockerfile' | 'docker-compose' | 'github-workflow' | 'sync-py' | 'entrypoint' | 'setup-repo';
+type WorkspaceTab = 'scripts' | 'simulatie' | 'verificatie';
+type ScriptTab = 'docker-compose' | 'dockerfile' | 'github-workflow' | 'sync-py' | 'entrypoint' | 'setup-repo';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -50,7 +49,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function App() {
-  const [activeSection, setActiveSection] = useState<ActiveSection>('overzicht');
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('simulatie');
   const [scriptTab, setScriptTab] = useState<ScriptTab>('docker-compose');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -59,8 +58,8 @@ export default function App() {
     sharepointSiteName: 'NEPNL-Operations',
     sharedFolderPath: '/02. Callsheets',
     ignoredFolders: ['Callsheets Archief'],
-    hostSyncVolumePath: '/opt/docker/callsheets',
-    hostVaultVolumePath: '/opt/docker/callsheets-vault',
+    hostSyncVolumePath: '/opt/docker/callsheets/data',
+    hostVaultVolumePath: '/opt/docker/callsheets/vault',
     containerDataPath: '/data/sync',
     containerVaultPath: '/vault',
     oktaOrgUrl: 'https://nepglobal.okta.com',
@@ -73,19 +72,14 @@ export default function App() {
     startHour: 8,
     endHour: 20,
     intervalHours: 2,
-    weekdaysOnly: false,
-    verifyChecksums: true,
-    bandwidthLimitMbps: 25
+    weekdaysOnly: false
   });
 
   const [newIgnoreFolder, setNewIgnoreFolder] = useState<string>('');
 
-  // Interactive Headless Docker Device Code + Okta MFA Handshake State
-  const [mfaStep, setMfaStep] = useState<1 | 2 | 3>(3);
-  const [deviceCode, setDeviceCode] = useState<string>('DK9-4M7X2');
-  const [totpCode, setTotpCode] = useState<string>('482910');
-  const [tokenExpiryMinutes, setTokenExpiryMinutes] = useState<number>(58);
-  const [tokenFingerprint, setTokenFingerprint] = useState<string>('FERNET::AES128-9F4A-77C1');
+  // 60-Minute Access Token Time-to-Live (TTL) State for Sync Simulator
+  const [tokenExpiryMinutes, setTokenExpiryMinutes] = useState<number>(46);
+  const [autoDecayTtl, setAutoDecayTtl] = useState<boolean>(true);
 
   // Simulation state
   const [files, setFiles] = useState<SyncFileItem[]>(INITIAL_SYNC_FILES);
@@ -94,6 +88,15 @@ export default function App() {
   const [fileSearch, setFileSearch] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'alle' | 'gesynchroniseerd' | 'nieuw' | 'gewijzigd' | 'overgeslagen'>('alle');
   const [isSimulatingRun, setIsSimulatingRun] = useState<boolean>(false);
+
+  // Live countdown timer for simulated 60-minute Access Token TTL
+  useEffect(() => {
+    if (!autoDecayTtl) return;
+    const timer = setInterval(() => {
+      setTokenExpiryMinutes((prev) => Math.max(0, prev - 1));
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [autoDecayTtl]);
 
   const timeSlots = useMemo(
     () => computeSyncTimeSlots(config.startHour, config.endHour, config.intervalHours),
@@ -114,32 +117,32 @@ export default function App() {
     return {
       'docker-compose': {
         filename: 'docker-compose.yml',
-        label: 'Lokale Docker Host configuratie met Volume Mounts & Fernet Key',
+        label: 'Lokale Docker Host configuratie (Poort 5555, /opt/docker/callsheets/{data,vault})',
         content: generateDockerComposeYaml(config)
       },
       'dockerfile': {
         filename: 'Dockerfile',
-        label: 'Non-root Python 3.12 + Supercronic Container Image',
+        label: 'Multi-stage Linux/amd64 Container (Web UI Poort 5555 + Supercronic)',
         content: generateDockerfile(config)
       },
       'github-workflow': {
         filename: '.github/workflows/docker-publish.yml',
-        label: 'GitHub Actions Build & Push bij elke git push (linux/amd64)',
+        label: 'GitHub Actions Build & Push naar GHCR bij elke git push',
         content: generateGithubWorkflowYaml(config)
       },
       'sync-py': {
         filename: 'sync.py',
-        label: 'Python MSAL Device Code + Fernet AES-128 Token Vault Script',
+        label: 'Python SharePoint Cookie Vault & Graph Sync Script',
         content: generateDockerPythonSyncScript(config)
       },
       'entrypoint': {
         filename: 'entrypoint.sh',
-        label: 'Container Entrypoint & Supercronic 08:00–20:00 Crontab',
+        label: 'Container Entrypoint (Web Server Poort 5555 + Supercronic)',
         content: generateEntrypointScript(config)
       },
       'setup-repo': {
         filename: 'setup-repo.sh',
-        label: '1-Stap Repo Setup & Git Push Script (zet .github/workflows exact goed)',
+        label: '1-Stap Repo Setup & Git Push Script',
         content: generateRepoBootstrapScript(config)
       }
     };
@@ -161,6 +164,42 @@ export default function App() {
     [files]
   );
 
+  // Token TTL status computation based on 60-minute expiration logic
+  const ttlPercentage = Math.min(100, Math.max(0, Math.round((tokenExpiryMinutes / 60) * 100)));
+  const ttlState = useMemo(() => {
+    if (tokenExpiryMinutes === 0) {
+      return {
+        level: 'verlopen' as const,
+        label: 'Access Token Verlopen (0 min resterend)',
+        description:
+          'De 60-minuten TTL is verstreken. Bij het eerstvolgende 2-uurlijkse Supercronic-slot haalt de container automatisch een nieuw 60-minuten Access Token op uit de versleutelde Fernet-kluis (/vault).',
+        barColor: 'bg-red-600',
+        borderColor: 'border-red-300 bg-red-50/70',
+        textColor: 'text-red-800'
+      };
+    }
+    if (tokenExpiryMinutes <= 15) {
+      return {
+        level: 'kritiek' as const,
+        label: `Waarschuwing: Token verloopt bijna (${tokenExpiryMinutes} / 60 min)`,
+        description:
+          'Minder dan 15 minuten resterend op het huidige 60-minuten token. Stille token-rotatie via Okta/SharePoint kluis staat klaar voor de volgende sync.',
+        barColor: 'bg-amber-500',
+        borderColor: 'border-amber-300 bg-amber-50/70',
+        textColor: 'text-amber-900'
+      };
+    }
+    return {
+      level: 'gezond' as const,
+      label: `Access Token Actief (${tokenExpiryMinutes} / 60 min TTL)`,
+      description:
+        'Huidig token is geldig binnen het 60-minuten venster. Elke 2-uurlijkse sync vernieuwt de sessie automatisch op basis van de 60-minuten verloop-logica.',
+      barColor: 'bg-emerald-600',
+      borderColor: 'border-slate-200 bg-slate-50',
+      textColor: 'text-emerald-800'
+    };
+  }, [tokenExpiryMinutes]);
+
   const handleCopyCode = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
@@ -178,19 +217,6 @@ export default function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
-
-  const handleStartDeviceBootstrap = () => {
-    const randomChars = Math.random().toString(36).substring(2, 7).toUpperCase();
-    setDeviceCode(`DK9-${randomChars}`);
-    setMfaStep(1);
-  };
-
-  const handleCompleteMfaBootstrap = () => {
-    const randomHex = Math.floor(1000 + Math.random() * 9000).toString(16).toUpperCase();
-    setTokenFingerprint(`FERNET::AES128-9F4A-${randomHex}`);
-    setTokenExpiryMinutes(60);
-    setMfaStep(3);
   };
 
   const isFileInIgnoredFolder = (relativePath: string, ignored: string[]) => {
@@ -225,6 +251,7 @@ export default function App() {
       let downloadedCount = 0;
       let ignoredCount = 0;
       let transferredBytes = 0;
+      const hadExpiredOrLowToken = tokenExpiryMinutes <= 15;
 
       const updatedFiles = files.map((file) => {
         if (isFileInIgnoredFolder(file.relativePath, config.ignoredFolders)) {
@@ -247,19 +274,25 @@ export default function App() {
       });
 
       setFiles(updatedFiles);
+      // Reset Access Token TTL back to full 60 minutes upon sync execution
       setTokenExpiryMinutes(60);
 
       const ignoredNote =
         config.ignoredFolders.length > 0
-          ? ` Genegeerde mappen overgeslagen: ${config.ignoredFolders.join(', ')} (${ignoredCount} bestand).`
+          ? ` Genegeerd: ${config.ignoredFolders.join(', ')} (${ignoredCount}).`
           : '';
+
+      const vaultFileLabel =
+        config.authMethod === 'sharepoint-cookie-vault' ? 'sp_cookies.enc' : 'token_cache.enc';
 
       const newLog: SyncRunLog = {
         id: `run-${Date.now()}`,
         slotTime,
-        executedAt: `Vandaag ${slotTime}:02 (Container ${config.dockerImageName})`,
-        authModeUsed: `Fernet AES-128 Vault (${config.containerVaultPath}/token_cache.enc)`,
-        tokenStatus: 'Access Token vernieuwd via Okta Refresh Token (geldig 60m)',
+        executedAt: `Vandaag ${slotTime}:02 (${config.dockerImageName})`,
+        authModeUsed: `Fernet Kluis (${config.containerVaultPath}/${vaultFileLabel})`,
+        tokenStatus: hadExpiredOrLowToken
+          ? 'Verlopen token stilzwijgend vernieuwd -> TTL 60m'
+          : 'Token gevalideerd & geroteerd -> TTL 60m',
         filesChecked: updatedFiles.length + 34,
         filesDownloaded: downloadedCount,
         bytesTransferred: transferredBytes,
@@ -267,13 +300,13 @@ export default function App() {
         status: 'voltooid',
         details:
           downloadedCount > 0
-            ? `Supercronic trigger ${slotTime}: ${downloadedCount} bestand(en) gedownload naar ${config.hostSyncVolumePath}.${ignoredNote}`
-            : `Supercronic trigger ${slotTime}: Geen gewijzigde bestanden op O365 gedeelde map sinds vorige run.${ignoredNote}`
+            ? `Slot ${slotTime}: ${downloadedCount} bestand(en) gedownload naar ${config.hostSyncVolumePath}.${ignoredNote}`
+            : `Slot ${slotTime}: Geen gewijzigde bestanden sinds vorige controle.${ignoredNote}`
       };
 
       setRunLogs((prev) => [newLog, ...prev]);
       setIsSimulatingRun(false);
-    }, 350);
+    }, 300);
   };
 
   const handleAddSimulatedRemoteFile = () => {
@@ -315,119 +348,112 @@ export default function App() {
     setFiles((prev) => [newFile, ...prev]);
   };
 
+  const appVersion = import.meta.env.VITE_APP_VERSION || 'v.01';
+
+  const initCmd =
+    config.authMethod === 'sharepoint-cookie-vault'
+      ? `docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-cookies`
+      : `docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-auth`;
+
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col">
-      {/* Top Bar Contract: Zone 1 (Wordmark) - Zone 2 (4-5 Nav Links) - Zone 3 (1 Primary CTA) */}
-      <header className="flex items-center justify-between gap-8 px-6 py-4 bg-white border-b border-slate-200 sticky top-0 z-30">
-        <a
-          href="#overzicht"
-          onClick={(e) => {
-            e.preventDefault();
-            setActiveSection('overzicht');
-          }}
-          className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
-        >
-          O365 Okta Sync Studio
-        </a>
+      {/* Responsive Top Bar: Brand + Run CTA on top row (mobile), Full-width Scrollable Tabs on second row (mobile) / inline on desktop */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 px-4 sm:px-6 py-3">
+        <div className="max-w-[1440px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-base font-bold tracking-tight text-slate-900 truncate">
+                O365 Okta Sync
+              </span>
+              <span className="text-[11px] font-mono font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0">
+                {appVersion}
+              </span>
+              <span className="text-xs font-mono text-slate-500 hidden sm:inline truncate">
+                ghcr.io/{config.githubRepo.toLowerCase()} · :5555
+              </span>
+            </div>
 
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
-          <a
-            href="#overzicht"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveSection('overzicht');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 ${
-              activeSection === 'overzicht' ? 'border-slate-900 text-slate-900 font-semibold' : 'border-transparent'
-            }`}
-          >
-            Docker Overzicht
-          </a>
-          <a
-            href="#authenticatie"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveSection('authenticatie');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 ${
-              activeSection === 'authenticatie' ? 'border-slate-900 text-slate-900 font-semibold' : 'border-transparent'
-            }`}
-          >
-            Okta MFA in Docker
-          </a>
-          <a
-            href="#planning"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveSection('planning');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 ${
-              activeSection === 'planning' ? 'border-slate-900 text-slate-900 font-semibold' : 'border-transparent'
-            }`}
-          >
-            Tijdschema (08:00–20:00)
-          </a>
-          <a
-            href="#scripts"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveSection('scripts');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 ${
-              activeSection === 'scripts' ? 'border-slate-900 text-slate-900 font-semibold' : 'border-transparent'
-            }`}
-          >
-            Docker & GitHub Build
-          </a>
-          <a
-            href="#simulatie"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveSection('simulatie');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 ${
-              activeSection === 'simulatie' ? 'border-slate-900 text-slate-900 font-semibold' : 'border-transparent'
-            }`}
-          >
-            Sync Simulator
-          </a>
-        </nav>
+            {/* Mobile Primary Action Button */}
+            <button
+              type="button"
+              onClick={() => handleTriggerSyncSlot(selectedSlot)}
+              disabled={isSimulatingRun}
+              className="md:hidden px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Play className="w-3.5 h-3.5" />
+              {isSimulatingRun ? 'Bezig...' : `Sync (${selectedSlot})`}
+            </button>
+          </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+          {/* Navigation Tabs - Responsive Grid on Mobile, Segmented Bar on Desktop */}
+          <nav className="grid grid-cols-3 md:flex items-center gap-1 p-1 bg-slate-100 rounded-lg w-full md:w-auto">
+            <button
+              type="button"
+              onClick={() => setActiveTab('simulatie')}
+              className={`px-2.5 sm:px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors text-center truncate cursor-pointer ${
+                activeTab === 'simulatie'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Simulator & TTL
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('scripts')}
+              className={`px-2.5 sm:px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors text-center truncate cursor-pointer ${
+                activeTab === 'scripts'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Docker & GitHub
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('verificatie')}
+              className={`px-2.5 sm:px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors text-center truncate cursor-pointer ${
+                activeTab === 'verificatie'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Host Diagnose
+            </button>
+          </nav>
+
+          {/* Desktop Primary Action Button */}
           <button
-            onClick={() =>
-              handleDownloadScript(
-                generatedScripts[scriptTab].filename,
-                generatedScripts[scriptTab].content
-              )
-            }
-            className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
+            type="button"
+            onClick={() => handleTriggerSyncSlot(selectedSlot)}
+            disabled={isSimulatingRun}
+            className="hidden md:flex px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 items-center gap-1.5 cursor-pointer disabled:opacity-50"
           >
-            <Download className="w-3.5 h-3.5" />
-            Download {generatedScripts[scriptTab].filename.split('/').pop()}
+            <Play className="w-3.5 h-3.5" />
+            {isSimulatingRun ? 'Bezig...' : `Run Sync (${selectedSlot})`}
           </button>
         </div>
       </header>
 
-      {/* Main Workspace Layout: Left Configuration Sidebar + Main Content Viewport */}
-      <div className="flex-1 max-w-[1440px] w-full mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8 px-6 py-8">
-        {/* Left Column: Live Docker + GitHub + O365 Configuration Parameters */}
-        <aside className="lg:col-span-4 space-y-6">
-          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+      {/* Main Workspace: Mobile shows Active Workspace First, Config Sidebar Second */}
+      <div className="flex-1 max-w-[1440px] w-full mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 px-4 sm:px-6 py-5 sm:py-6">
+        {/* Left Column on Desktop / Second on Mobile: Streamlined Configuration */}
+        <aside className="lg:col-span-4 order-2 lg:order-1 space-y-5">
+          <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
-                <h2 className="text-base font-bold text-slate-900">Docker & GitHub Parameters</h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Configureer uw GitHub repository, lokale Docker volume mounts en O365/Okta gegevens.
+                <h2 className="text-sm font-bold text-slate-900">Container Configuratie</h2>
+                <p className="text-xs text-slate-500">
+                  Wijzigingen werken direct door in alle Docker-bestanden.
                 </p>
               </div>
               <SlidersHorizontal className="w-4 h-4 text-slate-400 shrink-0" />
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-3.5">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  Headless Container Authenticatie (Okta MFA)
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Authenticatie Methode (Zonder IT-goedkeuring)
                 </label>
                 <select
                   value={config.authMethod}
@@ -436,83 +462,84 @@ export default function App() {
                   }
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 font-medium focus:outline-none focus:ring-2 focus:ring-slate-900"
                 >
-                  <option value="oauth2-device-fernet">
-                    1. Microsoft First-Party Client + Fernet Kluis (Zonder IT-goedkeuring)
-                  </option>
                   <option value="sharepoint-cookie-vault">
-                    2. Directe SharePoint REST API + Okta Cookie Kluis (100% AADSTS65001-vrij)
+                    1. SharePoint REST API + Okta Cookie Kluis (Aanbevolen)
+                  </option>
+                  <option value="oauth2-device-fernet">
+                    2. Microsoft Graph CLI (14d82eec) + Fernet Kluis
                   </option>
                   <option value="rclone-docker-encrypted">
-                    3. Rclone Container + AES-256 Versleutelde Config
+                    3. Rclone Container + Versleutelde Config
                   </option>
                 </select>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  {selectedStrategy.subtitle}
+                </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              {config.authMethod === 'oauth2-device-fernet' && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    GitHub Repository
+                    Microsoft First-Party Client ID
                   </label>
-                  <input
-                    type="text"
-                    value={config.githubRepo}
-                    onChange={(e) => setConfig({ ...config, githubRepo: e.target.value })}
+                  <select
+                    value={config.clientId}
+                    onChange={(e) => setConfig({ ...config, clientId: e.target.value })}
                     className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
+                  >
+                    <option value="14d82eec-204b-4c2f-b7e8-296a70dab67e">
+                      14d82eec-... (Microsoft Graph CLI)
+                    </option>
+                    <option value="ab9b8c07-8f02-4f72-87fa-80105867a763">
+                      ab9b8c07-... (OneDrive SyncEngine)
+                    </option>
+                    <option value="9bc3ab49-b65d-410a-85ad-bf819febf99b">
+                      9bc3ab49-... (SharePoint Online Client)
+                    </option>
+                  </select>
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Container Naam
-                  </label>
-                  <input
-                    type="text"
-                    value={config.dockerImageName}
-                    onChange={(e) => setConfig({ ...config, dockerImageName: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-              </div>
+              )}
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    O365 Tenant Domein
+                    SharePoint Domein
                   </label>
                   <input
                     type="text"
                     value={config.tenantDomain}
                     onChange={(e) => setConfig({ ...config, tenantDomain: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    SharePoint Site Naam
+                    Site Naam
                   </label>
                   <input
                     type="text"
                     value={config.sharepointSiteName}
                     onChange={(e) => setConfig({ ...config, sharepointSiteName: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900"
                   />
                 </div>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Gedeelde O365 Map Pad (Bron in Shared Documents)
+                  Gedeelde Map in SharePoint
                 </label>
                 <input
                   type="text"
                   value={config.sharedFolderPath}
                   onChange={(e) => setConfig({ ...config, sharedFolderPath: e.target.value })}
-                  className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                  className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Genegeerde SharePoint Submappen (Ignore List)
+                  Genegeerde Submappen (Ignore List)
                 </label>
                 <div className="flex gap-2">
                   <input
@@ -526,14 +553,14 @@ export default function App() {
                         handleAddIgnoreFolder();
                       }
                     }}
-                    className="flex-1 px-3 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="flex-1 px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 min-w-0"
                   />
                   <button
                     type="button"
                     onClick={handleAddIgnoreFolder}
-                    className="px-3 py-1.5 text-xs font-semibold bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="px-3 py-1.5 text-xs font-semibold bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
                   >
-                    Toevoegen
+                    +
                   </button>
                 </div>
                 {config.ignoredFolders.length > 0 && (
@@ -541,17 +568,17 @@ export default function App() {
                     {config.ignoredFolders.map((folder) => (
                       <div
                         key={folder}
-                        className="flex items-center justify-between px-3 py-1.5 text-xs"
+                        className="flex items-center justify-between px-2.5 py-1.5 text-xs"
                       >
                         <span className="font-mono text-slate-800 flex items-center gap-1.5 truncate">
                           <FolderX className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                          {folder}
+                          <span className="truncate">{folder}</span>
                         </span>
                         <button
                           type="button"
                           onClick={() => handleRemoveIgnoreFolder(folder)}
-                          aria-label={`Verwijder ${folder} uit negeerlijst`}
-                          className="text-slate-400 hover:text-red-600 transition-colors p-1 cursor-pointer"
+                          aria-label={`Verwijder ${folder}`}
+                          className="text-slate-400 hover:text-red-600 transition-colors p-0.5 cursor-pointer shrink-0"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -561,87 +588,68 @@ export default function App() {
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Host Doelmap (Docker Volume)
+                    Host Data Map (Callsheets)
                   </label>
                   <input
                     type="text"
                     value={config.hostSyncVolumePath}
                     onChange={(e) => setConfig({ ...config, hostSyncVolumePath: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Host Token Kluis Pad
+                    Host Vault Map (Kluis)
                   </label>
                   <input
                     type="text"
                     value={config.hostVaultVolumePath}
                     onChange={(e) => setConfig({ ...config, hostVaultVolumePath: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900"
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Okta Federatie URL
+                    GitHub Repo
+                  </label>
+                  <input
+                    type="text"
+                    value={config.githubRepo}
+                    onChange={(e) => setConfig({ ...config, githubRepo: e.target.value })}
+                    className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Okta Login URL
                   </label>
                   <input
                     type="text"
                     value={config.oktaOrgUrl}
                     onChange={(e) => setConfig({ ...config, oktaOrgUrl: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    O365 / Okta Gebruikersnaam
-                  </label>
-                  <input
-                    type="text"
-                    value={config.usernameHint}
-                    onChange={(e) => setConfig({ ...config, usernameHint: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Microsoft First-Party Client ID (Zonder IT Admin Consent)
-                </label>
-                <select
-                  value={config.clientId}
-                  onChange={(e) => setConfig({ ...config, clientId: e.target.value })}
-                  className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                >
-                  <option value="14d82eec-204b-4c2f-b7e8-296a70dab67e">
-                    14d82eec-204b-4c2f-b7e8-296a70dab67e (Microsoft Graph Command Line Tools)
-                  </option>
-                  <option value="ab9b8c07-8f02-4f72-87fa-80105867a763">
-                    ab9b8c07-8f02-4f72-87fa-80105867a763 (OneDrive SyncEngine)
-                  </option>
-                  <option value="9bc3ab49-b65d-410a-85ad-bf819febf99b">
-                    9bc3ab49-b65d-410a-85ad-bf819febf99b (SharePoint Online Client)
-                  </option>
-                </select>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Let op: Microsoft Office (<code className="font-mono">d3590ed6-...</code>) geeft <code className="font-mono">AADSTS65002</code> op Graph. Aanbevolen zonder IT-goedkeuring: <strong>Optie 1 (SharePoint Cookie Kluis, --init-cookies)</strong>.
-                </p>
               </div>
 
               <div className="pt-2 border-t border-slate-100">
-                <label className="block text-xs font-semibold text-slate-700 mb-2">
-                  Tijdsvenster in Container ({config.timezone}: 08:00 – 20:00, elke 2 uur)
-                </label>
-                <div className="grid grid-cols-3 gap-2.5">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold text-slate-700">
+                    Schema ({config.timezone})
+                  </label>
+                  <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                    {cronExpression}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
                   <div>
-                    <span className="block text-[11px] text-slate-500 mb-1">Startuur</span>
+                    <span className="block text-[11px] text-slate-500 mb-0.5">Start (u)</span>
                     <input
                       type="number"
                       min={0}
@@ -653,11 +661,11 @@ export default function App() {
                           startHour: Math.min(Number(e.target.value), config.endHour - 1)
                         })
                       }
-                      className="w-full px-2.5 py-1.5 text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-lg"
+                      className="w-full px-2 py-1 text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-lg"
                     />
                   </div>
                   <div>
-                    <span className="block text-[11px] text-slate-500 mb-1">Einduur</span>
+                    <span className="block text-[11px] text-slate-500 mb-0.5">Eind (u)</span>
                     <input
                       type="number"
                       min={1}
@@ -669,824 +677,589 @@ export default function App() {
                           endHour: Math.max(Number(e.target.value), config.startHour + 1)
                         })
                       }
-                      className="w-full px-2.5 py-1.5 text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-lg"
+                      className="w-full px-2 py-1 text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-lg"
                     />
                   </div>
                   <div>
-                    <span className="block text-[11px] text-slate-500 mb-1">Interval (uur)</span>
+                    <span className="block text-[11px] text-slate-500 mb-0.5">Stap</span>
                     <select
                       value={config.intervalHours}
                       onChange={(e) =>
                         setConfig({ ...config, intervalHours: Number(e.target.value) })
                       }
-                      className="w-full px-2.5 py-1.5 text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-lg"
+                      className="w-full px-2 py-1 text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-lg"
                     >
-                      <option value={1}>Elke 1u</option>
-                      <option value={2}>Elke 2u</option>
-                      <option value={3}>Elke 3u</option>
-                      <option value={4}>Elke 4u</option>
+                      <option value={1}>1 uur</option>
+                      <option value={2}>2 uur</option>
+                      <option value={3}>3 uur</option>
+                      <option value={4}>4 uur</option>
                     </select>
                   </div>
                 </div>
-              </div>
 
-              <div className="flex items-center justify-between pt-2">
-                <label className="text-xs text-slate-700 font-medium flex items-center gap-2 cursor-pointer">
+                <label className="text-xs text-slate-700 font-medium flex items-center gap-2 mt-2.5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={config.weekdaysOnly}
                     onChange={(e) => setConfig({ ...config, weekdaysOnly: e.target.checked })}
-                    className="rounded border-slate-300 text-slate-900 focus:ring-slate-900"
+                    className="rounded border-slate-300 text-slate-900"
                   />
                   Alleen op werkdagen (Ma–Vr)
                 </label>
-                <span className="text-xs font-mono text-slate-500 tabular-nums">
-                  {timeSlots.length} runs / dag
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Headless Docker Security Explanation Box */}
-          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
-            <div className="flex items-center gap-2 text-slate-900 font-semibold text-sm">
-              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-              Hoe werkt Okta MFA in een headless Docker container?
-            </div>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Een Docker container heeft geen browservenster voor Okta MFA en er mogen <strong>nooit wachtwoorden of tokens in de GitHub build</strong> staan.
-            </p>
-            <div className="pt-2 border-t border-slate-100 text-xs text-slate-500 space-y-1.5">
-              <div>
-                <strong className="text-slate-800">1. GitHub Actions Build:</strong> Bouwt een schone image (<code className="font-mono">ghcr.io/{config.githubRepo.toLowerCase()}</code>) met Python + MSAL + Supercronic zonder credentials.
-              </div>
-              <div>
-                <strong className="text-slate-800">2. Device Code Bootstrap:</strong> Voer op uw lokale Docker host eenmalig <code className="font-mono">docker exec -it {config.dockerImageName} python3 /app/sync.py --init-auth</code> uit en log op uw eigen pc/telefoon in met Username + Password + Okta MFA.
-              </div>
-              <div>
-                <strong className="text-slate-800">3. Fernet AES-128 Kluis:</strong> Het Refresh Token wordt versleuteld opgeslagen in <code className="font-mono">{config.hostVaultVolumePath}</code> en elke 2 uur (08:00–20:00) stilzwijgend ververst.
               </div>
             </div>
           </div>
         </aside>
 
-        {/* Right Column: Main Interactive Workspace */}
-        <main className="lg:col-span-8 space-y-8">
-          {/* Top Summary Metrics Strip */}
-          <section id="overzicht" className="bg-white border border-slate-200 rounded-xl p-6">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-100">
-              <div>
-                <div className="text-xs text-slate-500 flex items-center gap-2 flex-wrap">
-                  <span>GitHub Build</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono">ghcr.io/{config.githubRepo.toLowerCase()}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>Lokale Docker Host ({config.hostSyncVolumePath})</span>
-                </div>
-                <h1 className="text-2xl font-bold text-slate-900 tracking-tight mt-1 text-balance">
-                  Docker & GitHub CI/CD: 2-Uurlijkse O365 Sync ({String(config.startHour).padStart(2, '0')}:00 – {String(config.endHour).padStart(2, '0')}:00)
-                </h1>
+        {/* Right Column on Desktop / First on Mobile: Focused Tab Content */}
+        <main className="lg:col-span-8 order-1 lg:order-2 space-y-5 sm:space-y-6">
+          {/* Compact 3-Metric Summary Bar */}
+          <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-3 gap-3.5 sm:gap-4">
+            <div className="min-w-0">
+              <div className="text-xs text-slate-500">Supercronic Schema</div>
+              <div className="text-sm font-bold font-mono tabular-nums text-slate-900 mt-0.5">
+                {cronExpression} ({timeSlots.length}x / dag)
               </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={() => handleTriggerSyncSlot(selectedSlot)}
-                  disabled={isSimulatingRun}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer disabled:opacity-50"
-                >
-                  <Play className="w-3.5 h-3.5" />
-                  {isSimulatingRun ? 'Container Sync...' : `Test Container Run (${selectedSlot})`}
-                </button>
+              <div className="text-[11px] text-slate-500">
+                {timeSlots[0]} t/m {timeSlots[timeSlots.length - 1]} · {config.timezone}
               </div>
             </div>
 
-            {/* 4-Column Metric Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 pt-6">
-              <div>
-                <div className="text-xs text-slate-500">Supercronic Tijdslots</div>
-                <div className="text-xl font-bold font-mono tabular-nums text-slate-900 mt-1">
-                  {timeSlots.length} runs / dag
-                </div>
-                <div className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
-                  {timeSlots[0]} t/m {timeSlots[timeSlots.length - 1]} ({config.timezone})
-                </div>
+            <div className="min-w-0">
+              <div className="text-xs text-slate-500">Actieve Kluis (/vault)</div>
+              <div className="text-sm font-bold text-emerald-700 mt-0.5 flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  {config.authMethod === 'sharepoint-cookie-vault'
+                    ? 'sp_cookies.enc (FedAuth)'
+                    : config.authMethod === 'rclone-docker-encrypted'
+                    ? 'rclone.conf (AES-256)'
+                    : 'token_cache.enc (Fernet)'}
+                </span>
               </div>
-
-              <div>
-                <div className="text-xs text-slate-500">Container Cron Expressie</div>
-                <div className="text-base font-bold font-mono tabular-nums text-slate-900 mt-1.5">
-                  {cronExpression}
-                </div>
-                <div className="text-xs text-slate-500 mt-0.5">
-                  Non-root UID 1000 runner
-                </div>
-              </div>
-
-              <div>
-                <div className="text-xs text-slate-500">Docker Volume Token Kluis</div>
-                <div className="text-base font-bold text-emerald-700 mt-1.5 flex items-center gap-1.5">
-                  <Lock className="w-4 h-4 shrink-0" />
-                  Fernet AES-128
-                </div>
-                <div className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">
-                  {config.containerVaultPath}/token_cache.enc
-                </div>
-              </div>
-
-              <div>
-                <div className="text-xs text-slate-500">Wachtrij Gedeelde Map</div>
-                <div className="text-xl font-bold font-mono tabular-nums text-slate-900 mt-1">
-                  {pendingFilesCount} {pendingFilesCount === 1 ? 'bestand' : 'bestanden'}
-                </div>
-                <div className="text-xs text-slate-500 mt-0.5">
-                  Bind-mount: <span className="font-mono">{config.containerDataPath}</span>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Ready-to-Use GitHub Build & Docker Config Generator Section */}
-          <section id="scripts" className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
-              <div>
-                <h2 className="text-lg font-bold text-slate-900">
-                  01. GitHub Repository & Lokale Docker Host Bestanden (linux/amd64)
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Belangrijk voor GitHub Actions: plaats <code className="font-mono text-slate-800">.github/workflows/docker-publish.yml</code> exact in de verborgen map <code className="font-mono text-slate-800">.github/workflows/</code> (met punt ervoor) en de overige bestanden in de root van <code className="font-mono text-slate-800">{config.githubRepo}</code>.
-                </p>
-              </div>
-
-              {/* Script Selector Tabs */}
-              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
-                <button
-                  onClick={() => setScriptTab('docker-compose')}
-                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    scriptTab === 'docker-compose'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  docker-compose.yml
-                </button>
-                <button
-                  onClick={() => setScriptTab('dockerfile')}
-                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    scriptTab === 'dockerfile'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  Dockerfile
-                </button>
-                <button
-                  onClick={() => setScriptTab('github-workflow')}
-                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    scriptTab === 'github-workflow'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  GitHub Action (.yml)
-                </button>
-                <button
-                  onClick={() => setScriptTab('sync-py')}
-                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    scriptTab === 'sync-py'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  sync.py
-                </button>
-                <button
-                  onClick={() => setScriptTab('entrypoint')}
-                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    scriptTab === 'entrypoint'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  entrypoint.sh
-                </button>
-                <button
-                  onClick={() => setScriptTab('setup-repo')}
-                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    scriptTab === 'setup-repo'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  setup-repo.sh
-                </button>
+              <div className="text-[11px] text-slate-500 font-mono truncate">
+                {config.hostVaultVolumePath}
               </div>
             </div>
 
-            <div className="space-y-3">
-              <div className="flex items-center justify-between bg-slate-900 text-slate-200 px-4 py-2.5 rounded-t-lg border-b border-slate-800">
-                <div className="flex items-center gap-2 text-xs font-mono">
-                  <Terminal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <span>{generatedScripts[scriptTab].filename}</span>
-                  <span aria-hidden="true" className="text-slate-600">·</span>
-                  <span className="text-slate-400 font-sans">{generatedScripts[scriptTab].label}</span>
-                </div>
+            <div className="min-w-0">
+              <div className="text-xs text-slate-500">Host Data Map & Filter</div>
+              <div className="text-sm font-bold font-mono text-slate-900 mt-0.5 truncate">
+                {config.hostSyncVolumePath}
+              </div>
+              <div className="text-[11px] text-slate-500 truncate">
+                Negeert: {config.ignoredFolders.join(', ') || 'Geen'}
+              </div>
+            </div>
+          </div>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() =>
-                      handleCopyCode(scriptTab, generatedScripts[scriptTab].content)
-                    }
-                    className="px-2.5 py-1 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    {copiedId === scriptTab ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        Gekopieerd
-                      </>
+          {/* TAB 1: SYNC SIMULATOR & ACCESS TOKEN TTL MONITOR */}
+          {activeTab === 'simulatie' && (
+            <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-6 space-y-5 sm:space-y-6">
+              {/* Visual 60-Minute Access Token Time-to-Live (TTL) Status & Progress Bar */}
+              <div className={`border rounded-xl p-3.5 sm:p-4 space-y-3 transition-colors ${ttlState.borderColor}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2">
+                    {ttlState.level === 'gezond' ? (
+                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
                     ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" />
-                        Kopieer Code
-                      </>
+                      <AlertTriangle
+                        className={`w-4 h-4 shrink-0 ${
+                          ttlState.level === 'verlopen' ? 'text-red-600' : 'text-amber-600'
+                        }`}
+                      />
                     )}
-                  </button>
-                  <button
-                    onClick={() =>
-                      handleDownloadScript(
-                        generatedScripts[scriptTab].filename,
-                        generatedScripts[scriptTab].content
-                      )
-                    }
-                    className="px-2.5 py-1 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white rounded transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Download
-                  </button>
+                    <span className={`text-xs font-bold ${ttlState.textColor}`}>
+                      {ttlState.label}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 sm:flex items-center gap-1.5 sm:gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setTokenExpiryMinutes(12)}
+                      className="px-2 py-1 text-[11px] font-medium bg-white border border-slate-300 text-slate-700 rounded hover:bg-slate-100 transition-colors text-center cursor-pointer"
+                    >
+                      Test &lt;15m
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTokenExpiryMinutes(0)}
+                      className="px-2 py-1 text-[11px] font-medium bg-white border border-slate-300 text-slate-700 rounded hover:bg-slate-100 transition-colors text-center cursor-pointer"
+                    >
+                      Test 0m
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTokenExpiryMinutes(60)}
+                      className="px-2 py-1 text-[11px] font-semibold bg-slate-900 text-white rounded hover:bg-slate-800 transition-colors text-center cursor-pointer"
+                    >
+                      Reset 60m
+                    </button>
+                  </div>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="space-y-1.5">
+                  <div className="w-full h-2.5 bg-slate-200/80 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-300 ${ttlState.barColor}`}
+                      style={{ width: `${ttlPercentage}%` }}
+                    />
+                  </div>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-slate-600">
+                    <span>{ttlState.description}</span>
+                    <label className="flex items-center gap-1.5 font-mono shrink-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={autoDecayTtl}
+                        onChange={(e) => setAutoDecayTtl(e.target.checked)}
+                        className="rounded border-slate-300 text-slate-900"
+                      />
+                      Live aftellen ({ttlPercentage}%)
+                    </label>
+                  </div>
                 </div>
               </div>
 
-              <pre className="bg-slate-950 text-slate-100 p-4 rounded-b-lg text-xs font-mono overflow-x-auto max-h-[420px] leading-relaxed -mt-3">
-                <code>{generatedScripts[scriptTab].content}</code>
-              </pre>
-            </div>
-          </section>
-
-          {/* Okta MFA + Headless Docker Authentication Architecture & Interactive Device Code Simulator */}
-          <section id="authenticatie" className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-              <div>
-                <h2 className="text-lg font-bold text-slate-900">
-                  02. Headless Docker Authenticatie: Username + Password + Okta MFA
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Hoe de lokaal gehoste container authenticeert zonder browser of opgeslagen wachtwoorden.
-                </p>
-              </div>
-              {/* Segmented Filter Control for Auth Strategy */}
-              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg shrink-0">
-                {AUTH_STRATEGIES.map((strategy, idx) => (
-                  <button
-                    key={strategy.id}
-                    onClick={() => setConfig({ ...config, authMethod: strategy.id })}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      config.authMethod === strategy.id
-                        ? 'bg-white text-slate-900 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    Optie {idx + 1}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-              {/* Left 7 Cols: Selected Strategy Details */}
-              <div className="md:col-span-7 space-y-4">
-                <div>
-                  <div className="text-xs text-emerald-700 font-semibold">
-                    {selectedStrategy.securityRating} · {selectedStrategy.recommended ? 'Aanbevolen voor Lokale Docker Host' : 'Alternatieve Docker Architectuur'}
-                  </div>
-                  <h3 className="text-base font-bold text-slate-900 mt-1">
-                    {selectedStrategy.title}
+              {/* 08:00 - 20:00 Time Slots Strip */}
+              <div className="space-y-2.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                    Supercronic Tijdslots ({String(config.startHour).padStart(2, '0')}:00 – {String(config.endHour).padStart(2, '0')}:00)
                   </h3>
-                  <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
-                    {selectedStrategy.summary}
+                  <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                    Tik op een slot om een sync te testen (zet TTL op 60m)
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-7 gap-2">
+                  {timeSlots.map((slot) => {
+                    const completedLog = runLogs.find((l) => l.slotTime === slot);
+                    const isSelected = selectedSlot === slot;
+                    return (
+                      <button
+                        key={slot}
+                        type="button"
+                        onClick={() => handleTriggerSyncSlot(slot)}
+                        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          isSelected
+                            ? 'border-slate-900 bg-slate-900 text-white'
+                            : completedLog
+                            ? 'border-emerald-200 bg-emerald-50/50 text-slate-900 hover:border-emerald-400'
+                            : 'border-slate-200 bg-slate-50 text-slate-800 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold font-mono tabular-nums">{slot}</span>
+                          <Clock className={`w-3 h-3 ${isSelected ? 'text-slate-300' : 'text-slate-400'}`} />
+                        </div>
+                        <div
+                          className={`text-[11px] mt-1 font-medium truncate ${
+                            isSelected
+                              ? 'text-slate-200'
+                              : completedLog
+                              ? 'text-emerald-700'
+                              : 'text-slate-500'
+                          }`}
+                        >
+                          {completedLog ? `${completedLog.filesDownloaded} nieuw` : 'Gepland'}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Files Header & Controls */}
+              <div className="flex flex-col gap-3 pt-2 border-t border-slate-100">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="Zoek bestand of submap..."
+                      value={fileSearch}
+                      onChange={(e) => setFileSearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleAddSimulatedRemoteFile}
+                      className="px-2.5 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-lg transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Nieuw Bestand
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTriggerSyncSlot(selectedSlot)}
+                      className="px-3 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSimulatingRun ? 'animate-spin' : ''}`} />
+                      Sync Nu ({pendingFilesCount})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Status Filter Bar - Scrollable on small mobile screens */}
+                <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
+                  {(['alle', 'nieuw', 'gewijzigd', 'gesynchroniseerd', 'overgeslagen'] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setStatusFilter(st)}
+                      className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors capitalize whitespace-nowrap shrink-0 cursor-pointer ${
+                        statusFilter === st
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {st}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Mobile File Cards (< sm) & Desktop Table (sm+) */}
+              <div className="sm:hidden divide-y divide-slate-200 border border-slate-200 rounded-lg">
+                {filteredFiles.length === 0 ? (
+                  <div className="py-6 px-3 text-center text-xs text-slate-500">
+                    Geen bestanden gevonden voor dit filter.
+                  </div>
+                ) : (
+                  filteredFiles.map((file) => (
+                    <div key={file.id} className="p-3 space-y-1.5 text-xs">
+                      <div className="font-semibold text-slate-900 flex items-start gap-1.5 break-all">
+                        <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                        <span>{file.name}</span>
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-500 break-all">
+                        {file.relativePath}
+                      </div>
+                      <div className="flex items-center justify-between pt-1 text-[11px]">
+                        <span className="font-mono text-slate-600">
+                          {formatBytes(file.sizeBytes)} · {file.modifiedAt}
+                        </span>
+                        {file.status === 'gesynchroniseerd' && (
+                          <span className="text-emerald-700 font-medium">
+                            Sync ({file.syncedAtSlot})
+                          </span>
+                        )}
+                        {file.status === 'nieuw' && (
+                          <span className="text-amber-700 font-semibold">Nieuw</span>
+                        )}
+                        {file.status === 'gewijzigd' && (
+                          <span className="text-amber-700 font-semibold">Gewijzigd</span>
+                        )}
+                        {file.status === 'overgeslagen' && (
+                          <span className="text-slate-500 font-medium">Genegeerd</span>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="hidden sm:block overflow-x-auto border border-slate-200 rounded-lg">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
+                      <th className="py-2 px-3">Bestandsnaam & SharePoint Pad</th>
+                      <th className="py-2 px-3 text-right">Grootte</th>
+                      <th className="py-2 px-3 text-right">Gewijzigd</th>
+                      <th className="py-2 px-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 text-xs">
+                    {filteredFiles.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="py-6 text-center text-slate-500">
+                          Geen bestanden gevonden voor dit filter.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredFiles.map((file) => (
+                        <tr key={file.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-2 px-3">
+                            <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                              <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span>{file.name}</span>
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              {file.relativePath}
+                            </div>
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
+                            {formatBytes(file.sizeBytes)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600">
+                            {file.modifiedAt}
+                          </td>
+                          <td className="py-2 px-3">
+                            {file.status === 'gesynchroniseerd' && (
+                              <span className="text-emerald-700 font-medium">
+                                Gesynchroniseerd ({file.syncedAtSlot})
+                              </span>
+                            )}
+                            {file.status === 'nieuw' && (
+                              <span className="text-amber-700 font-semibold">
+                                Nieuw (wacht op sync)
+                              </span>
+                            )}
+                            {file.status === 'gewijzigd' && (
+                              <span className="text-amber-700 font-semibold">
+                                Gewijzigd op O365
+                              </span>
+                            )}
+                            {file.status === 'overgeslagen' && (
+                              <span className="text-slate-500 font-medium">
+                                Genegeerd (Ignore-map)
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Compact Container Run Logs */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                    Recente Container Runs (Supercronic Log)
+                  </h3>
+                  <span className="text-[11px] text-slate-500 font-mono">
+                    Laatste {Math.min(4, runLogs.length)} van {runLogs.length}
+                  </span>
+                </div>
+                <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg bg-slate-50/50">
+                  {runLogs.slice(0, 4).map((log) => (
+                    <div key={log.id} className="p-2.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 font-semibold text-slate-900 flex-wrap">
+                          <span className="font-mono">{log.slotTime}</span>
+                          <span className="text-slate-400">·</span>
+                          <span className="text-emerald-700">{log.tokenStatus}</span>
+                        </div>
+                        <p className="text-slate-600 text-[11px] break-words">{log.details}</p>
+                      </div>
+                      <div className="sm:text-right font-mono tabular-nums text-[11px] text-slate-500 shrink-0">
+                        {log.filesDownloaded} nieuw · {formatBytes(log.bytesTransferred)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* TAB 2: DOCKER & GITHUB FILES */}
+          {activeTab === 'scripts' && (
+            <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-6 space-y-4">
+              <div className="flex flex-col gap-3 border-b border-slate-100 pb-4">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">
+                    Project- & Containerbestanden (linux/amd64 · Poort 5555)
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Volumes: <code className="font-mono">{config.hostSyncVolumePath}</code> (data) en <code className="font-mono">{config.hostVaultVolumePath}</code> (vault).
                   </p>
                 </div>
 
-                <div className="space-y-2 pt-2 border-t border-slate-100 text-xs">
-                  <div>
-                    <span className="font-semibold text-slate-800">Okta MFA afhandeling in Docker: </span>
-                    <span className="text-slate-600">{selectedStrategy.mfaHandling}</span>
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-800">Persistente Container Kluis: </span>
-                    <span className="text-slate-600">{selectedStrategy.credentialStorage}</span>
-                  </div>
-                </div>
-
-                <div className="pt-2">
-                  <div className="text-xs font-semibold text-slate-800 mb-2">
-                    Implementatiestappen (GitHub naar Lokale Docker):
-                  </div>
-                  <ol className="space-y-2 text-xs text-slate-600">
-                    {selectedStrategy.steps.map((step, index) => (
-                      <li key={index} className="flex items-start gap-2.5">
-                        <span className="font-mono font-bold text-slate-900 tabular-nums shrink-0">
-                          0{index + 1}.
-                        </span>
-                        <span>{step}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              </div>
-
-              {/* Right 5 Cols: Interactive Docker Exec Device Code + Okta MFA Simulator */}
-              <div className="md:col-span-5 bg-slate-50 border border-slate-200 rounded-lg p-4 flex flex-col justify-between space-y-4">
-                <div>
-                  <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
-                    <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                      <Container className="w-3.5 h-3.5 text-slate-700" />
-                      Docker Exec MFA Bootstrap
-                    </span>
-                    <span className="text-[11px] font-mono text-slate-500 tabular-nums">
-                      Stap {mfaStep}/3
-                    </span>
-                  </div>
-
-                  {mfaStep === 1 && (
-                    <div className="space-y-3 pt-3">
-                      <p className="text-xs text-slate-600">
-                        <strong>Stap 1 (Container CLI):</strong> Na <code className="font-mono">docker exec -it {config.dockerImageName} python3 /app/sync.py --init-auth</code> toont de container deze OAuth2 Device Code:
-                      </p>
-                      <div className="space-y-1.5 bg-slate-900 text-slate-100 p-2.5 rounded font-mono text-[11px]">
-                        <div className="text-slate-400">Open: https://microsoft.com/devicelogin</div>
-                        <div className="text-emerald-400 font-bold">Code: {deviceCode}</div>
-                        <div className="text-slate-300">User: {config.usernameHint}</div>
-                      </div>
-                      <button
-                        onClick={() => setMfaStep(2)}
-                        className="w-full py-2 px-3 bg-slate-900 text-white text-xs font-semibold rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
-                      >
-                        Voer Username + Wachtwoord in & Doorsturen naar Okta
-                      </button>
-                    </div>
-                  )}
-
-                  {mfaStep === 2 && (
-                    <div className="space-y-3 pt-3">
-                      <p className="text-xs text-slate-600">
-                        <strong>Stap 2 (Okta MFA Verificatie):</strong> Na uw wachtwoord vraagt <code className="font-mono">{config.oktaOrgUrl}</code> om uw tweede factor (Okta Verify Push of TOTP).
-                      </p>
-                      <div>
-                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                          Okta 6-cijferige MFA Code
-                        </label>
-                        <input
-                          type="text"
-                          maxLength={6}
-                          value={totpCode}
-                          onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
-                          className="w-full px-3 py-1.5 text-sm font-mono tabular-nums tracking-widest bg-white border border-slate-300 rounded-lg"
-                        />
-                      </div>
-                      <button
-                        onClick={handleCompleteMfaBootstrap}
-                        className="w-full py-2 px-3 bg-emerald-700 text-white text-xs font-semibold rounded-lg hover:bg-emerald-800 transition-colors cursor-pointer"
-                      >
-                        Bevestig Okta MFA & Schrijf naar /vault
-                      </button>
-                    </div>
-                  )}
-
-                  {mfaStep === 3 && (
-                    <div className="space-y-3 pt-3">
-                      <div className="text-xs text-emerald-800 font-semibold flex items-center gap-1.5">
-                        <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                        Fernet Token Kluis Actief in Docker Volume
-                      </div>
-                      <div className="text-[11px] font-mono bg-white border border-slate-200 rounded p-2.5 space-y-1 text-slate-700">
-                        <div>Kluis: {config.containerVaultPath}/token_cache.enc</div>
-                        <div>Sleutel: {tokenFingerprint}</div>
-                        <div>Host pad: {config.hostVaultVolumePath}</div>
-                        <div>Status: Gereed voor {timeSlots.length} dagelijkse cron-runs</div>
-                      </div>
-                      <button
-                        onClick={handleStartDeviceBootstrap}
-                        className="w-full py-1.5 px-3 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                      >
-                        Simuleer `docker exec --init-auth` Handshake
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <div className="text-[11px] text-slate-500 border-t border-slate-200 pt-2.5">
-                  Zelfs als de container opnieuw wordt opgestart of geüpdatet vanuit GitHub Actions, blijft <code className="font-mono">token_cache.enc</code> bewaard op uw host-volume.
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Visual 08:00 - 20:00 Schedule Timeline */}
-          <section id="planning" className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <h2 className="text-lg font-bold text-slate-900">
-                  03. Dagelijks Supercronic Schema ({String(config.startHour).padStart(2, '0')}:00 tot {String(config.endHour).padStart(2, '0')}:00)
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Klik op een tijdslot om een container-synchronisatie op dat tijdstip te simuleren. Buiten dit venster (20:01–07:59) voert de container geen netwerkcalls uit.
-                </p>
-              </div>
-              <span className="text-xs font-mono text-slate-500 tabular-nums shrink-0">
-                Vensterduur: {config.endHour - config.startHour} uur · Stap: {config.intervalHours} uur
-              </span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2.5">
-              {timeSlots.map((slot) => {
-                const completedLog = runLogs.find((l) => l.slotTime === slot);
-                const isSelected = selectedSlot === slot;
-                return (
-                  <button
-                    key={slot}
-                    onClick={() => handleTriggerSyncSlot(slot)}
-                    className={`p-3 rounded-lg border text-left transition-all cursor-pointer ${
-                      isSelected
-                        ? 'border-slate-900 bg-slate-900 text-white'
-                        : completedLog
-                        ? 'border-emerald-200 bg-emerald-50/50 text-slate-900 hover:border-emerald-400'
-                        : 'border-slate-200 bg-slate-50 text-slate-800 hover:border-slate-300'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-bold font-mono tabular-nums">{slot}</span>
-                      <Clock className={`w-3.5 h-3.5 ${isSelected ? 'text-slate-300' : 'text-slate-400'}`} />
-                    </div>
-                    <div
-                      className={`text-[11px] mt-1.5 font-medium ${
-                        isSelected
-                          ? 'text-slate-200'
-                          : completedLog
-                          ? 'text-emerald-700'
-                          : 'text-slate-500'
+                <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
+                  {(
+                    [
+                      ['docker-compose', 'docker-compose.yml'],
+                      ['dockerfile', 'Dockerfile'],
+                      ['github-workflow', 'GitHub Action'],
+                      ['sync-py', 'sync.py'],
+                      ['entrypoint', 'entrypoint.sh'],
+                      ['setup-repo', 'setup-repo.sh']
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setScriptTab(key)}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        scriptTab === key
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
                       }`}
                     >
-                      {completedLog ? 'Voltooid' : 'Gepland'}
-                    </div>
-                    <div
-                      className={`text-[10px] font-mono tabular-nums mt-0.5 ${
-                        isSelected ? 'text-slate-300' : 'text-slate-400'
-                      }`}
-                    >
-                      {completedLog ? `${completedLog.filesDownloaded} nieuw` : 'Silent Token'}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-          {/* Live File Synchronization & Audit Log Simulator */}
-          <section id="simulatie" className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">
-                  04. Gedeelde O365 Map naar Docker Bind-Mount ({config.hostSyncVolumePath})
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-900 text-slate-200 px-3.5 sm:px-4 py-2.5 rounded-t-lg border-b border-slate-800">
+                  <div className="flex items-center gap-2 text-xs font-mono min-w-0">
+                    <Terminal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="truncate">{generatedScripts[scriptTab].filename}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCode(scriptTab, generatedScripts[scriptTab].content)}
+                      className="flex-1 sm:flex-initial justify-center px-2.5 py-1 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {copiedId === scriptTab ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          Gekopieerd
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          Kopieer
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDownloadScript(
+                          generatedScripts[scriptTab].filename,
+                          generatedScripts[scriptTab].content
+                        )
+                      }
+                      className="flex-1 sm:flex-initial justify-center px-2.5 py-1 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white rounded transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download
+                    </button>
+                  </div>
+                </div>
+
+                <pre className="bg-slate-950 text-slate-100 p-3.5 sm:p-4 rounded-b-lg text-xs font-mono overflow-x-auto max-h-[460px] leading-relaxed">
+                  <code>{generatedScripts[scriptTab].content}</code>
+                </pre>
+              </div>
+            </section>
+          )}
+
+          {/* TAB 3: HOST COMMANDS & TROUBLESHOOTING */}
+          {activeTab === 'verificatie' && (
+            <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-6 space-y-5 sm:space-y-6">
+              <div className="border-b border-slate-100 pb-3">
+                <h2 className="text-base font-bold text-slate-900">
+                  Verificatie op uw Docker Host & Foutdiagnose
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Voeg een testbestand toe aan de gedeelde Office 365 map en voer een 2-uurlijkse container-run uit om de delta-synchronisatie naar uw lokale host-volume te testen.
+                  Voer deze 3 stappen uit op uw lokale Docker server nadat de container via <code className="font-mono">docker compose up -d</code> is gestart.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={handleAddSimulatedRemoteFile}
-                  className="px-3 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  Simuleer Nieuw O365 Bestand
-                </button>
-                <button
-                  onClick={() => handleTriggerSyncSlot(selectedSlot)}
-                  className="px-3.5 py-2 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSimulatingRun ? 'animate-spin' : ''}`} />
-                  Synchroniseer Nu ({pendingFilesCount} wachtend)
-                </button>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 sm:gap-4">
+                <div className="border border-slate-200 rounded-lg p-3.5 sm:p-4 bg-slate-50 space-y-2">
+                  <div className="text-xs font-bold text-slate-900">
+                    1. Eenmalige Okta Sessie Opslaan
+                  </div>
+                  <p className="text-[11px] text-slate-600">
+                    Sla uw Okta/SharePoint sessie versleuteld op in <code className="font-mono">{config.hostVaultVolumePath}</code>:
+                  </p>
+                  <div className="bg-slate-900 text-slate-100 p-2.5 rounded font-mono text-[11px] flex items-center justify-between gap-2">
+                    <code className="break-all">{initCmd}</code>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCode('cmd-init', initCmd)}
+                      className="text-slate-300 hover:text-white shrink-0 cursor-pointer"
+                    >
+                      {copiedId === 'cmd-init' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 rounded-lg p-3.5 sm:p-4 bg-slate-50 space-y-2">
+                  <div className="text-xs font-bold text-slate-900">2. Verbindingstest (--verify)</div>
+                  <p className="text-[11px] text-slate-600">
+                    Controleert kluis, SharePoint-map, ignore-filter en schrijfrechten:
+                  </p>
+                  <div className="bg-slate-900 text-slate-100 p-2.5 rounded font-mono text-[11px] flex items-center justify-between gap-2">
+                    <code className="break-all">docker exec {config.dockerImageName} python3 /app/sync.py --verify</code>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopyCode(
+                          'cmd-verify',
+                          `docker exec ${config.dockerImageName} python3 /app/sync.py --verify`
+                        )
+                      }
+                      className="text-slate-300 hover:text-white shrink-0 cursor-pointer"
+                    >
+                      {copiedId === 'cmd-verify' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 rounded-lg p-3.5 sm:p-4 bg-slate-50 space-y-2">
+                  <div className="text-xs font-bold text-slate-900">3. Directe Sync (--force)</div>
+                  <p className="text-[11px] text-slate-600">
+                    Start direct een synchronisatie naar <code className="font-mono">{config.hostSyncVolumePath}</code>:
+                  </p>
+                  <div className="bg-slate-900 text-slate-100 p-2.5 rounded font-mono text-[11px] flex items-center justify-between gap-2">
+                    <code className="break-all">docker exec {config.dockerImageName} python3 /app/sync.py --force</code>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopyCode(
+                          'cmd-force',
+                          `docker exec ${config.dockerImageName} python3 /app/sync.py --force`
+                        )
+                      }
+                      className="text-slate-300 hover:text-white shrink-0 cursor-pointer"
+                    >
+                      {copiedId === 'cmd-force' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
 
-            {/* Filter & Search Bar */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="relative flex-1 max-w-sm">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="Filter op bestandsnaam, map of auteur..."
-                  value={fileSearch}
-                  onChange={(e) => setFileSearch(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                />
-              </div>
-
-              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg self-start overflow-x-auto">
-                {(['alle', 'nieuw', 'gewijzigd', 'gesynchroniseerd', 'overgeslagen'] as const).map((st) => (
-                  <button
-                    key={st}
-                    onClick={() => setStatusFilter(st)}
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors capitalize whitespace-nowrap shrink-0 cursor-pointer ${
-                      statusFilter === st
-                        ? 'bg-white text-slate-900 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {st}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* High-Density Data Grid */}
-            <div className="overflow-x-auto border border-slate-200 rounded-lg">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
-                    <th className="py-2.5 px-3">Bestandsnaam & SharePoint Pad</th>
-                    <th className="py-2.5 px-3">Auteur (O365)</th>
-                    <th className="py-2.5 px-3 text-right">Grootte</th>
-                    <th className="py-2.5 px-3 text-right">Gewijzigd</th>
-                    <th className="py-2.5 px-3">Status & Doelpad</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 text-xs">
-                  {filteredFiles.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-500">
-                        Geen bestanden gevonden voor dit filter. Klik op &ldquo;Simuleer Nieuw O365 Bestand&rdquo; om een item toe te voegen.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredFiles.map((file) => (
-                      <tr key={file.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="py-2.5 px-3">
-                          <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                            <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span>{file.name}</span>
-                          </div>
-                          <div className="text-[11px] font-mono text-slate-500 mt-0.5">
-                            {file.relativePath} · SHA256: {file.sha256}
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-600 font-mono text-[11px]">
-                          {file.author}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
-                          {formatBytes(file.sizeBytes)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-600">
-                          {file.modifiedAt}
-                        </td>
-                        <td className="py-2.5 px-3">
-                          {file.status === 'gesynchroniseerd' && (
-                            <span className="text-emerald-700 font-medium">
-                              Op Host Volume · <span className="font-mono tabular-nums">{file.syncedAtSlot}</span>
-                            </span>
-                          )}
-                          {file.status === 'nieuw' && (
-                            <span className="text-amber-700 font-semibold">
-                              Wacht op eerstvolgende 2u-sync
-                            </span>
-                          )}
-                          {file.status === 'gewijzigd' && (
-                            <span className="text-amber-700 font-semibold">
-                              Delta gewijzigd op O365
-                            </span>
-                          )}
-                          {file.status === 'overgeslagen' && (
-                            <span className="text-slate-500 font-medium">
-                              Genegeerd (Ignore-map)
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Execution Audit Log */}
-            <div className="pt-2 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-slate-900">
-                  Docker Container Synchronisatie Logs (Supercronic stdout)
+              <div className="space-y-2.5">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Veelvoorkomende Foutmeldingen & Oplossingen
                 </h3>
-                <span className="text-xs text-slate-500 font-mono tabular-nums">
-                  Laatste {runLogs.length} runs
-                </span>
-              </div>
-
-              <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg bg-slate-50/50">
-                {runLogs.map((log) => (
-                  <div key={log.id} className="p-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-2 text-slate-900 font-semibold flex-wrap">
-                        <span className="font-mono tabular-nums">Slot {log.slotTime}</span>
-                        <span aria-hidden="true" className="text-slate-400">·</span>
-                        <span>{log.authModeUsed}</span>
-                        <span aria-hidden="true" className="text-slate-400">·</span>
-                        <span className="text-emerald-700">{log.tokenStatus}</span>
-                      </div>
-                      <p className="text-slate-600">{log.details}</p>
+                <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg">
+                  <div className="p-3.5 space-y-1 text-xs">
+                    <div className="font-mono font-bold text-slate-900">
+                      AADSTS65001 / AADSTS65002 (Entra ID blokkeert OAuth-app consent)
                     </div>
-                    <div className="text-right font-mono tabular-nums text-[11px] text-slate-500 shrink-0">
-                      <div>{log.filesDownloaded} gedownload / {log.filesChecked} gecheckt</div>
-                      <div>{formatBytes(log.bytesTransferred)} · {log.durationMs} ms</div>
-                    </div>
+                    <p className="text-slate-600">
+                      Gebruik <strong>Optie 1 (<code className="font-mono">--init-cookies</code>)</strong>. Hiermee gebruikt de container de directe SharePoint REST API met uw Okta-browsersessie zonder Entra App.
+                    </p>
                   </div>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          {/* Section 05: Preflight Verification & Enterprise Okta/Entra Risk Matrix */}
-          <section id="verificatie" className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
-            <div className="border-b border-slate-100 pb-4">
-              <h2 className="text-lg font-bold text-slate-900">
-                05. Verbinding Verifiëren & Okta / Entra ID Risico-check
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Deze web-app is een generator en draait zelf geen Docker of Okta-sessie. Gebruik deze 3 testcommando&rsquo;s op uw lokale Docker host om 100% zeker te weten dat de verbinding werkt vóórdat de 2-uurlijkse cron start.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-2">
-                <div className="text-xs font-bold text-slate-900">
-                  1. Eenmalige Okta MFA Login ({config.authMethod === 'sharepoint-cookie-vault' ? '--init-cookies' : '--init-auth'})
-                </div>
-                <p className="text-[11px] text-slate-600">
-                  {config.authMethod === 'sharepoint-cookie-vault'
-                    ? 'Slaat FedAuth + rtFa cookies van uw Okta browsersessie versleuteld op in /vault.'
-                    : `Start de Device Code Flow met Microsoft Office Client ID via ${config.oktaOrgUrl}.`}
-                </p>
-                <div className="bg-slate-900 text-slate-100 p-2.5 rounded font-mono text-[11px] flex items-center justify-between gap-2">
-                  <code className="truncate">
-                    {config.authMethod === 'sharepoint-cookie-vault'
-                      ? `docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-cookies`
-                      : `docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-auth`}
-                  </code>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleCopyCode(
-                        'cmd-init',
-                        config.authMethod === 'sharepoint-cookie-vault'
-                          ? `docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-cookies`
-                          : `docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-auth`
-                      )
-                    }
-                    className="text-slate-300 hover:text-white shrink-0 cursor-pointer"
-                    aria-label="Kopieer init commando"
-                  >
-                    {copiedId === 'cmd-init' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
+                  <div className="p-3.5 space-y-1 text-xs">
+                    <div className="font-mono font-bold text-slate-900">
+                      PermissionError: /vault/sp_cookies.enc
+                    </div>
+                    <p className="text-slate-600">
+                      Voer op de host <code className="font-mono break-all">chown -R 1000:1000 {config.hostSyncVolumePath} {config.hostVaultVolumePath}</code> uit of pull de nieuwste image via <code className="font-mono">docker compose pull && docker compose up -d</code>.
+                    </p>
+                  </div>
+                  <div className="p-3.5 space-y-1 text-xs">
+                    <div className="font-mono font-bold text-slate-900">
+                      Head &quot;https://ghcr.io/.../latest&quot;: denied
+                    </div>
+                    <p className="text-slate-600">
+                      GHCR package staat op Private. Log in via <code className="font-mono">docker login ghcr.io -u {config.githubRepo.split('/')[0]}</code> of bouw lokaal met <code className="font-mono">docker compose up -d --build</code>.
+                    </p>
+                  </div>
                 </div>
               </div>
-
-              <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-2">
-                <div className="text-xs font-bold text-slate-900">2. Verbindingstest (--verify)</div>
-                <p className="text-[11px] text-slate-600">
-                  Test sessie, SharePoint-pad, <span className="font-mono">Callsheets Archief</span> filter en schrijfrechten zonder te downloaden.
-                </p>
-                <div className="bg-slate-900 text-slate-100 p-2.5 rounded font-mono text-[11px] flex items-center justify-between gap-2">
-                  <code className="truncate">docker exec {config.dockerImageName} python3 /app/sync.py --verify</code>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleCopyCode(
-                        'cmd-verify',
-                        `docker exec ${config.dockerImageName} python3 /app/sync.py --verify`
-                      )
-                    }
-                    className="text-slate-300 hover:text-white shrink-0 cursor-pointer"
-                    aria-label="Kopieer verify commando"
-                  >
-                    {copiedId === 'cmd-verify' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-2">
-                <div className="text-xs font-bold text-slate-900">3. Directe Test-sync (--force)</div>
-                <p className="text-[11px] text-slate-600">
-                  Test een echte download naar <span className="font-mono">{config.hostSyncVolumePath}</span> ook buiten 08:00–20:00.
-                </p>
-                <div className="bg-slate-900 text-slate-100 p-2.5 rounded font-mono text-[11px] flex items-center justify-between gap-2">
-                  <code className="truncate">docker exec {config.dockerImageName} python3 /app/sync.py --force</code>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleCopyCode(
-                        'cmd-force',
-                        `docker exec ${config.dockerImageName} python3 /app/sync.py --force`
-                      )
-                    }
-                    className="text-slate-300 hover:text-white shrink-0 cursor-pointer"
-                    aria-label="Kopieer force commando"
-                  >
-                    {copiedId === 'cmd-force' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="overflow-x-auto border border-slate-200 rounded-lg">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
-                    <th className="py-2.5 px-3">Mogelijke IT-blokkade bij NEP / Okta</th>
-                    <th className="py-2.5 px-3">Wat u ziet tijdens --init-auth of --verify</th>
-                    <th className="py-2.5 px-3">Oplossing ZONDER IT-goedkeuring</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-slate-900">
-                      GHCR Docker Pull geweigerd (Package is Private of nog niet gepusht)
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
-                      Head &quot;https://ghcr.io/.../manifests/latest&quot;: denied
-                    </td>
-                    <td className="py-2.5 px-3 text-slate-600">
-                      Log eenmalig in met een GitHub PAT (<code className="font-mono">read:packages</code>): <code className="font-mono">echo &quot;$PAT&quot; | docker login ghcr.io -u {config.githubRepo.split('/')[0]} --password-stdin</code>, of zet de package op GitHub op <strong>Public</strong>, of bouw lokaal met <code className="font-mono">docker compose up -d --build</code>.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-slate-900">
-                      First-party app niet gepreauthoriseerd voor Graph
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
-                      AADSTS65002 (bijv. d3590ed6-... op 00000003-...)
-                    </td>
-                    <td className="py-2.5 px-3 text-slate-600">
-                      Stap over naar <strong>Optie 1 (SharePoint REST API + FedAuth Cookie Vault via <code className="font-mono">--init-cookies</code>)</strong>. Er komt dan helemaal geen Entra OAuth2 app aan te pas.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-slate-900">
-                      App-consent geblokkeerd (geen IT goedkeuring)
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
-                      AADSTS65001 / Need admin approval
-                    </td>
-                    <td className="py-2.5 px-3 text-slate-600">
-                      Gebruik <strong>Optie 1 (Directe SharePoint REST API + FedAuth Cookie Vault via <code className="font-mono">--init-cookies</code>)</strong> waar helemaal geen Entra App aan te pas komt.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-slate-900">
-                      Device Code Flow geblokkeerd door Conditional Access
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
-                      AADSTS53003 / Device code flow blocked
-                    </td>
-                    <td className="py-2.5 px-3 text-slate-600">
-                      Schakel bovenin over naar <strong>Optie 1 (SharePoint Cookie Vault)</strong> of <strong>Optie 3 (Rclone via eigen browser)</strong>. Beide werken zonder Device Code Flow.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-slate-900">
-                      Okta Sign-In Frequency laat sessie verlopen
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600">
-                      AADSTS50076 / HTTP 401-403
-                    </td>
-                    <td className="py-2.5 px-3 text-slate-600">
-                      Door elke 2 uur (08:00–20:00) te pingen blijft de sessie actief. Als Okta toch opnieuw MFA afdwingt, ververs eenmalig met <code className="font-mono">--init-auth</code> of <code className="font-mono">--init-cookies</code>.
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
+            </section>
+          )}
         </main>
       </div>
-
-      <footer className="border-t border-slate-200 bg-white py-4 px-6 mt-auto">
-        <div className="max-w-[1440px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
-          <div>
-            O365 Okta Sync Studio · GitHub Actions Build naar Lokale Docker Container (Device Code + Fernet Vault)
-          </div>
-          <div className="font-mono tabular-nums">
-            Cron: {cronExpression} ({config.timezone})
-          </div>
-        </div>
-      </footer>
     </div>
   );
 }

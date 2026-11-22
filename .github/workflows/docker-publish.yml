@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - "**"
-    tags:
-      - "*"
   workflow_dispatch:
 
 env:
@@ -16,12 +14,28 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - name: Checkout GitHub Repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Bepaal volgend versienummer (start bij v.01)
+        id: version
+        run: |
+          git fetch --tags --force
+          LAST_NUM=$(git tag -l 'v.[0-9]*' | sed -E 's/^v\.0*([0-9]+)$/\1/' | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
+          if [ -z "$LAST_NUM" ]; then
+            NEXT_NUM=1
+          else
+            NEXT_NUM=$((LAST_NUM + 1))
+          fi
+          NEXT_VERSION=$(printf "v.%02d" "$NEXT_NUM")
+          echo "version=${NEXT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Toegewezen release-versie: ${NEXT_VERSION}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -39,6 +53,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
             type=ref,event=branch
             type=sha,prefix=sha-
             type=raw,value=latest
@@ -49,7 +64,16 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Push Git Versie-tag (${{ steps.version.outputs.version }})
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"

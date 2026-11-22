@@ -20,8 +20,6 @@ export interface SyncConfig {
   endHour: number;
   intervalHours: number;
   weekdaysOnly: boolean;
-  verifyChecksums: boolean;
-  bandwidthLimitMbps: number;
 }
 
 export interface AuthStrategyInfo {
@@ -71,7 +69,7 @@ export const AUTH_STRATEGIES: AuthStrategyInfo[] = [
     securityRating: 'Hoog (Zero-OAuth / Geen Entra App)',
     recommended: true,
     mfaHandling: 'U logt in uw normale browser in op SharePoint via `nepglobal.okta.com` (Username + Password + Okta MFA) en slaat de `FedAuth` + `rtFa` sessiecookies eenmalig versleuteld op via `--init-cookies`.',
-    credentialStorage: 'Versleutelde cookie-kluis (`sp_cookies.enc`) met Fernet AES-128 in `/opt/docker/callsheets-vault`.',
+    credentialStorage: 'Versleutelde cookie-kluis (`sp_cookies.enc`) met Fernet AES-128 in `/opt/docker/callsheets/vault`.',
     summary: 'Zowel externe apps (`AADSTS65001`) als first-party apps zoals Microsoft Office (`AADSTS65002`) worden door Entra ID geblokkeerd voor Graph-scopes zonder IT-preauthorisatie. De SharePoint REST API (`_api/web/GetFolderByServerRelativePath`) werkt met uw normale Okta-browsersessie zonder enige Entra OAuth-app.',
     pros: [
       '100% immuun voor `AADSTS65001`, `AADSTS65002` en `AADSTS53003` — geen Entra App nodig',
@@ -92,7 +90,7 @@ export const AUTH_STRATEGIES: AuthStrategyInfo[] = [
     securityRating: 'Hoog (Zero-Password Vault)',
     recommended: false,
     mfaHandling: 'Eenmalige `docker exec -it oktasync python3 /app/sync.py --init-auth` met Microsoft Graph CLI (`14d82eec-...`). U logt op uw eigen pc in met Username + Password + Okta MFA.',
-    credentialStorage: 'MSAL TokenCache versleuteld met Fernet (AES-128-CBC + HMAC-SHA256) in `/opt/docker/callsheets-vault/token_cache.enc`.',
+    credentialStorage: 'MSAL TokenCache versleuteld met Fernet (AES-128-CBC + HMAC-SHA256) in `/opt/docker/callsheets/vault/token_cache.enc`.',
     summary: 'Gebruikt Microsofts officiële Graph CLI Client ID (`14d82eec-...`), die wél voor Microsoft Graph is gepreauthoriseerd (voorkomt `AADSTS65002`). Geeft uw tenant alsnog `AADSTS65001`? Schakel dan direct over naar Optie 1 (`--init-cookies`).',
     pros: [
       'Voorkomt `AADSTS65002` doordat `14d82eec-...` specifiek voor Microsoft Graph is geautoriseerd',
@@ -113,18 +111,18 @@ export const AUTH_STRATEGIES: AuthStrategyInfo[] = [
     subtitle: 'Eenmalige Okta browser-autorisatie vanaf eigen laptop met versleutelde rclone.conf in Docker',
     securityRating: 'Hoog (AES-256 Config Encryptie)',
     recommended: false,
-    mfaHandling: 'U voert eenmalig `rclone authorize "onedrive"` uit op een werkstation met browser (Username + Password + Okta MFA) en plaatst het versleutelde resultaat in `/opt/docker/callsheets-vault/rclone.conf`.',
+    mfaHandling: 'U voert eenmalig `rclone authorize "onedrive"` uit op een werkstation met browser (Username + Password + Okta MFA) en plaatst het versleutelde resultaat in `/opt/docker/callsheets/vault/rclone.conf`.',
     credentialStorage: 'AES-256 versleutelde `rclone.conf` gemount in `/vault`, ontsleuteld via `RCLONE_CONFIG_PASS`.',
     summary: 'Alternatief voor wie Rclone verkiest: autoriseer op een eigen werkstation in de browser via Okta en draai de container vervolgens headless met `--exclude "Callsheets Archief/**"`.',
     pros: [
       'Ingebouwde `--exclude "Callsheets Archief/**"` en QuickXorHash delta-controle',
       'Geen Device Code Flow op de server zelf nodig tijdens het inloggen',
-      'Configuratiebestand op `/opt/docker/callsheets-vault` is AES-256 versleuteld'
+      'Configuratiebestand op `/opt/docker/callsheets/vault` is AES-256 versleuteld'
     ],
     steps: [
       'Voer op uw laptop `rclone authorize "onedrive"` uit via `nepglobal.okta.com` + Okta MFA.',
-      'Sla de versleutelde `rclone.conf` op in `/opt/docker/callsheets-vault`.',
-      'De Docker container voert elke 2 uur (08:00–20:00) `rclone copy` uit naar `/opt/docker/callsheets`.'
+      'Sla de versleutelde `rclone.conf` op in `/opt/docker/callsheets/vault`.',
+      'De Docker container voert elke 2 uur (08:00–20:00) `rclone copy` uit naar `/opt/docker/callsheets/data`.'
     ]
   }
 ];
@@ -207,7 +205,7 @@ export const INITIAL_RUN_LOGS: SyncRunLog[] = [
     bytesTransferred: 4821900,
     durationMs: 2410,
     status: 'voltooid',
-    details: 'Supercronic trigger 08:00: 2 callsheets weggeschreven naar /opt/docker/callsheets. Map "Callsheets Archief" overgeslagen.'
+    details: 'Supercronic trigger 08:00: 2 callsheets weggeschreven naar /opt/docker/callsheets/data. Map "Callsheets Archief" overgeslagen.'
   },
   {
     id: 'run-1000',
@@ -220,7 +218,7 @@ export const INITIAL_RUN_LOGS: SyncRunLog[] = [
     bytesTransferred: 1284500,
     durationMs: 1540,
     status: 'voltooid',
-    details: 'Supercronic trigger 10:00: OBVan_UHD1_Eredivisie_Weekend.xlsx bijgewerkt in /opt/docker/callsheets/ENG & OB.'
+    details: 'Supercronic trigger 10:00: OBVan_UHD1_Eredivisie_Weekend.xlsx bijgewerkt in /opt/docker/callsheets/data/ENG & OB.'
   },
   {
     id: 'run-1200',

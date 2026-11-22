@@ -5,7 +5,7 @@ CRON_SCHEDULE="${SYNC_CRON_SCHEDULE:-0 8-20/2 * * *}"
 CRONTAB_FILE="/tmp/o365_sync_crontab"
 
 echo "=================================================================="
-echo " O365 + Okta MFA Docker Sync Container Gestart"
+echo " O365 + Okta MFA Docker Sync Container Gestart (${APP_VERSION:-v.01})"
 echo " Tijdzone       : ${TZ:-Europe/Amsterdam}"
 echo " Web UI Poort   : http://0.0.0.0:${WEB_PORT:-5555}"
 echo " Cron Schema    : ${CRON_SCHEDULE} (Elke 2u tussen 08:00 en 20:00)"
