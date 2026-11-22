@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   ShieldCheck,
   Clock,
@@ -15,7 +15,12 @@ import {
   SlidersHorizontal,
   FolderX,
   Trash2,
-  AlertTriangle
+  AlertTriangle,
+  Activity,
+  Folder,
+  FolderOpen,
+  ArrowUp,
+  ChevronRight
 } from 'lucide-react';
 import {
   SyncConfig,
@@ -34,11 +39,77 @@ import {
   generateDockerComposeYaml,
   generateEntrypointScript,
   generateDockerPythonSyncScript,
+  generateWebServerScript,
   generateRepoBootstrapScript
 } from './utils/scriptGenerators';
 
 type WorkspaceTab = 'scripts' | 'simulatie' | 'verificatie';
-type ScriptTab = 'docker-compose' | 'dockerfile' | 'github-workflow' | 'sync-py' | 'entrypoint' | 'setup-repo';
+type ScriptTab = 'docker-compose' | 'dockerfile' | 'github-workflow' | 'sync-py' | 'web-server' | 'entrypoint' | 'setup-repo';
+
+interface LiveSyncRun {
+  id: string;
+  mode: string;
+  command: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  summary: string;
+}
+
+interface LiveFileItem {
+  id: string;
+  name: string;
+  relativePath: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  status: 'gesynchroniseerd';
+}
+
+interface LiveContainerStatus {
+  status: string;
+  version: string;
+  port: number;
+  vault_present: boolean;
+  vault_type: string | null;
+  vault_updated_at: string | null;
+  cron_schedule: string;
+  shared_folder: string;
+  ignored_folders: string;
+  local_sync_dir: string;
+  host_sync_dir?: string;
+  running: boolean;
+  mode: string | null;
+  command: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  output: string;
+  runs: LiveSyncRun[];
+  files?: LiveFileItem[];
+  total_files?: number;
+  total_bytes?: number;
+}
+
+interface BrowseEntry {
+  name: string;
+  path: string;
+  type: 'dir' | 'file';
+  sizeBytes: number;
+  itemCount?: number;
+  modifiedAt: string;
+}
+
+interface BrowseResponse {
+  status: string;
+  root_label: string;
+  container_dir: string;
+  current_path: string;
+  parent_path: string | null;
+  exists: boolean;
+  entries: BrowseEntry[];
+  total_files: number;
+  total_bytes: number;
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -81,6 +152,21 @@ export default function App() {
   const [tokenExpiryMinutes, setTokenExpiryMinutes] = useState<number>(46);
   const [autoDecayTtl, setAutoDecayTtl] = useState<boolean>(true);
 
+  // Live container API state (Port 5555) vs AI Studio Preview fallback
+  const [containerMode, setContainerMode] = useState<'checking' | 'live' | 'preview'>('checking');
+  const [liveStatus, setLiveStatus] = useState<LiveContainerStatus | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [isTriggeringLive, setIsTriggeringLive] = useState<boolean>(false);
+  const [isClearingLogs, setIsClearingLogs] = useState<boolean>(false);
+  const [dataSourceView, setDataSourceView] = useState<'live' | 'simulator'>('live');
+  const [browsePath, setBrowsePath] = useState<string>('/');
+  const [browseData, setBrowseData] = useState<BrowseResponse | null>(null);
+  const [browseLoading, setBrowseLoading] = useState<boolean>(false);
+  const [browseError, setBrowseError] = useState<string | null>(null);
+  const browsePathRef = useRef<string>('/');
+  const wasLiveRunningRef = useRef<boolean>(false);
+  const logPreRef = useRef<HTMLPreElement | null>(null);
+
   // Simulation state
   const [files, setFiles] = useState<SyncFileItem[]>(INITIAL_SYNC_FILES);
   const [runLogs, setRunLogs] = useState<SyncRunLog[]>(INITIAL_RUN_LOGS);
@@ -88,6 +174,168 @@ export default function App() {
   const [fileSearch, setFileSearch] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'alle' | 'gesynchroniseerd' | 'nieuw' | 'gewijzigd' | 'overgeslagen'>('alle');
   const [isSimulatingRun, setIsSimulatingRun] = useState<boolean>(false);
+
+  useEffect(() => {
+    browsePathRef.current = browsePath;
+  }, [browsePath]);
+
+  const fetchBrowseDirectory = useCallback(async (targetPath: string) => {
+    const cleanTarget = targetPath && targetPath.startsWith('/') ? targetPath : '/';
+    setBrowseLoading(true);
+    setBrowseError(null);
+    try {
+      const res = await fetch(`/api/files?path=${encodeURIComponent(cleanTarget)}`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store'
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        setBrowseError('Filebrowser API (/api/files) alleen beschikbaar in de actieve Docker-container.');
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        setBrowseError(data.error || `Kan map niet openen (HTTP ${res.status}).`);
+        return;
+      }
+      setBrowseData(data as BrowseResponse);
+      setBrowsePath(data.current_path || '/');
+    } catch {
+      setBrowseError('Netwerkfout bij ophalen van /api/files.');
+    } finally {
+      setBrowseLoading(false);
+    }
+  }, []);
+
+  const fetchLiveStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/status', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store'
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        setContainerMode('preview');
+        return;
+      }
+      const data = (await res.json()) as LiveContainerStatus;
+      if (data && data.status === 'ok') {
+        setContainerMode('live');
+        setLiveStatus(data);
+        setLiveError(null);
+
+        if (wasLiveRunningRef.current && !data.running) {
+          if (data.exit_code === 0) {
+            setTokenExpiryMinutes(60);
+          }
+          fetchBrowseDirectory(browsePathRef.current);
+        }
+        wasLiveRunningRef.current = Boolean(data.running);
+      } else {
+        setContainerMode('preview');
+      }
+    } catch {
+      setContainerMode('preview');
+    }
+  }, [fetchBrowseDirectory]);
+
+  useEffect(() => {
+    fetchLiveStatus();
+  }, [fetchLiveStatus]);
+
+  useEffect(() => {
+    if (containerMode === 'live') {
+      fetchBrowseDirectory(browsePathRef.current);
+    }
+  }, [containerMode, fetchBrowseDirectory]);
+
+  useEffect(() => {
+    if (containerMode !== 'live' || !liveStatus?.running) return;
+    const poller = setInterval(() => {
+      fetchLiveStatus();
+    }, 1200);
+    return () => clearInterval(poller);
+  }, [containerMode, liveStatus?.running, fetchLiveStatus]);
+
+  const handleTriggerLiveSync = async (mode: 'force' | 'verify') => {
+    setIsTriggeringLive(true);
+    setLiveError(null);
+    try {
+      const res = await fetch('/api/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify({ mode })
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        setLiveError('Backend /api/sync niet bereikbaar in preview-modus.');
+        return;
+      }
+      const data = await res.json();
+      if (res.status === 202 || res.status === 409) {
+        wasLiveRunningRef.current = true;
+        setLiveStatus((prev) => ({
+          ...(prev || ({} as LiveContainerStatus)),
+          ...data,
+          files: prev?.files,
+          total_files: prev?.total_files,
+          total_bytes: prev?.total_bytes
+        }));
+        if (res.status === 409) {
+          setLiveError('Er draait al een synchronisatie. Wacht tot de huidige run klaar is.');
+        }
+      } else {
+        setLiveError(data.error || `Fout bij starten van sync (HTTP ${res.status}).`);
+      }
+    } catch {
+      setLiveError('Netwerkfout bij het aanroepen van /api/sync op de container.');
+    } finally {
+      setIsTriggeringLive(false);
+    }
+  };
+
+  useEffect(() => {
+    if (logPreRef.current) {
+      logPreRef.current.scrollTop = logPreRef.current.scrollHeight;
+    }
+  }, [liveStatus?.output]);
+
+  const handleClearLogs = async () => {
+    if (containerMode !== 'live') {
+      setRunLogs([]);
+      return;
+    }
+    setIsClearingLogs(true);
+    setLiveError(null);
+    try {
+      const res = await fetch('/api/logs/clear', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        setLiveError('Kan log niet wissen: backend gaf geen geldig antwoord.');
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        setLiveError(data.error || `Log wissen mislukt (HTTP ${res.status}).`);
+        return;
+      }
+      setLiveStatus(data as LiveContainerStatus);
+    } catch {
+      setLiveError('Netwerkfout bij het wissen van het log.');
+    } finally {
+      setIsClearingLogs(false);
+    }
+  };
 
   // Live countdown timer for simulated 60-minute Access Token TTL
   useEffect(() => {
@@ -135,6 +383,11 @@ export default function App() {
         label: 'Python SharePoint Cookie Vault & Graph Sync Script',
         content: generateDockerPythonSyncScript(config)
       },
+      'web-server': {
+        filename: 'web_server.py',
+        label: 'Python Web UI & /api/sync Server (Poort 5555)',
+        content: generateWebServerScript(config)
+      },
       'entrypoint': {
         filename: 'entrypoint.sh',
         label: 'Container Entrypoint (Web Server Poort 5555 + Supercronic)',
@@ -148,16 +401,144 @@ export default function App() {
     };
   }, [config]);
 
-  const filteredFiles = useMemo(() => {
-    return files.filter((file) => {
-      const matchesSearch =
-        file.name.toLowerCase().includes(fileSearch.toLowerCase()) ||
-        file.relativePath.toLowerCase().includes(fileSearch.toLowerCase()) ||
-        file.author.toLowerCase().includes(fileSearch.toLowerCase());
-      const matchesStatus = statusFilter === 'alle' || file.status === statusFilter;
-      return matchesSearch && matchesStatus;
+  const showingLiveFiles = containerMode === 'live' && dataSourceView === 'live';
+
+  const simulatedBrowseData = useMemo<BrowseResponse>(() => {
+    const cleanShared = config.sharedFolderPath.replace(/^\/+|\/+$/g, '');
+    const cleanBrowse = browsePath === '/' ? '/' : `/${browsePath.replace(/^\/+|\/+$/g, '')}`;
+    const syncedOrMatched = files.filter((f) =>
+      statusFilter === 'alle' ? f.status !== 'overgeslagen' : f.status === statusFilter
+    );
+
+    const dirMap = new Map<string, { name: string; path: string; count: number; modifiedAt: string }>();
+    const fileEntries: BrowseEntry[] = [];
+    let totalBytes = 0;
+
+    syncedOrMatched.forEach((f) => {
+      totalBytes += f.sizeBytes;
+      let rel = f.relativePath.replace(/^\/+/, '');
+      if (cleanShared && rel.toLowerCase().startsWith(`${cleanShared.toLowerCase()}/`)) {
+        rel = rel.slice(cleanShared.length + 1);
+      }
+      const normalizedRel = `/${rel}`;
+      const prefix = cleanBrowse === '/' ? '/' : `${cleanBrowse}/`;
+      if (!normalizedRel.startsWith(prefix)) return;
+
+      const remainder = normalizedRel.slice(prefix.length);
+      const segments = remainder.split('/').filter(Boolean);
+      if (segments.length === 0) return;
+
+      if (segments.length === 1) {
+        fileEntries.push({
+          name: segments[0],
+          path: `${prefix}${segments[0]}`,
+          type: 'file',
+          sizeBytes: f.sizeBytes,
+          modifiedAt: f.modifiedAt
+        });
+      } else {
+        const folderName = segments[0];
+        const folderPath = `${prefix}${folderName}`;
+        const existing = dirMap.get(folderPath);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          dirMap.set(folderPath, {
+            name: folderName,
+            path: folderPath,
+            count: 1,
+            modifiedAt: f.modifiedAt
+          });
+        }
+      }
     });
-  }, [files, fileSearch, statusFilter]);
+
+    const dirEntries: BrowseEntry[] = Array.from(dirMap.values())
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((d) => ({
+        name: d.name,
+        path: d.path,
+        type: 'dir',
+        sizeBytes: 0,
+        itemCount: d.count,
+        modifiedAt: d.modifiedAt
+      }));
+
+    fileEntries.sort((a, b) => a.name.localeCompare(b.name));
+
+    const parentPath =
+      cleanBrowse === '/'
+        ? null
+        : cleanBrowse.slice(0, cleanBrowse.lastIndexOf('/')) || '/';
+
+    return {
+      status: 'ok',
+      root_label: config.hostSyncVolumePath,
+      container_dir: config.containerDataPath,
+      current_path: cleanBrowse,
+      parent_path: parentPath,
+      exists: true,
+      entries: [...dirEntries, ...fileEntries],
+      total_files: syncedOrMatched.length,
+      total_bytes: totalBytes
+    };
+  }, [files, browsePath, config.sharedFolderPath, config.hostSyncVolumePath, config.containerDataPath, statusFilter]);
+
+  const activeBrowse = useMemo<BrowseResponse>(() => {
+    if (showingLiveFiles) {
+      if (browseData) return browseData;
+      return {
+        status: 'ok',
+        root_label: liveStatus?.host_sync_dir || config.hostSyncVolumePath,
+        container_dir: liveStatus?.local_sync_dir || config.containerDataPath,
+        current_path: browsePath,
+        parent_path: browsePath === '/' ? null : browsePath.slice(0, browsePath.lastIndexOf('/')) || '/',
+        exists: true,
+        entries: [],
+        total_files: liveStatus?.total_files ?? 0,
+        total_bytes: liveStatus?.total_bytes ?? 0
+      };
+    }
+    return simulatedBrowseData;
+  }, [
+    showingLiveFiles,
+    browseData,
+    liveStatus?.host_sync_dir,
+    liveStatus?.local_sync_dir,
+    liveStatus?.total_files,
+    liveStatus?.total_bytes,
+    config.hostSyncVolumePath,
+    config.containerDataPath,
+    browsePath,
+    simulatedBrowseData
+  ]);
+
+  const filteredBrowseEntries = useMemo(() => {
+    const query = fileSearch.trim().toLowerCase();
+    if (!query) return activeBrowse.entries;
+    return activeBrowse.entries.filter(
+      (entry) =>
+        entry.name.toLowerCase().includes(query) ||
+        entry.path.toLowerCase().includes(query)
+    );
+  }, [activeBrowse.entries, fileSearch]);
+
+  const browseBreadcrumbs = useMemo(() => {
+    const parts = activeBrowse.current_path.split('/').filter(Boolean);
+    return parts.map((segment, idx) => ({
+      label: segment,
+      path: '/' + parts.slice(0, idx + 1).join('/')
+    }));
+  }, [activeBrowse.current_path]);
+
+  const handleNavigateBrowse = (nextPath: string) => {
+    const clean = nextPath.startsWith('/') ? nextPath : `/${nextPath}`;
+    if (showingLiveFiles) {
+      fetchBrowseDirectory(clean);
+    } else {
+      setBrowsePath(clean);
+    }
+  };
 
   const pendingFilesCount = useMemo(
     () => files.filter((f) => f.status === 'nieuw' || f.status === 'gewijzigd').length,
@@ -348,7 +729,17 @@ export default function App() {
     setFiles((prev) => [newFile, ...prev]);
   };
 
-  const appVersion = import.meta.env.VITE_APP_VERSION || 'v.01';
+  const appVersion = liveStatus?.version || import.meta.env.VITE_APP_VERSION || 'v.01';
+  const isBusy = containerMode === 'live' ? Boolean(liveStatus?.running || isTriggeringLive) : isSimulatingRun;
+
+  const handlePrimarySyncClick = () => {
+    setActiveTab('simulatie');
+    if (containerMode === 'live') {
+      handleTriggerLiveSync('force');
+    } else {
+      handleTriggerSyncSlot(selectedSlot);
+    }
+  };
 
   const initCmd =
     config.authMethod === 'sharepoint-cookie-vault'
@@ -356,37 +747,47 @@ export default function App() {
       : `docker exec -it ${config.dockerImageName} python3 /app/sync.py --init-auth`;
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col">
-      {/* Responsive Top Bar: Brand + Run CTA on top row (mobile), Full-width Scrollable Tabs on second row (mobile) / inline on desktop */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 px-4 sm:px-6 py-3">
-        <div className="max-w-[1440px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <div className="flex items-center justify-between gap-3">
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col overflow-x-hidden">
+      {/* Responsive Top Bar: Static top bar so it never overlaps content while scrolling, with lg breakpoint to avoid right-edge clipping */}
+      <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-3">
+        <div className="max-w-[1440px] mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div className="flex items-center justify-between gap-3 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
-              <span className="text-base font-bold tracking-tight text-slate-900 truncate">
+              <span className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap">
                 O365 Okta Sync
               </span>
               <span className="text-[11px] font-mono font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0">
                 {appVersion}
               </span>
-              <span className="text-xs font-mono text-slate-500 hidden sm:inline truncate">
+              {containerMode === 'live' && (
+                <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                  Live
+                </span>
+              )}
+              <span className="text-xs font-mono text-slate-500 hidden xl:inline truncate">
                 ghcr.io/{config.githubRepo.toLowerCase()} · :5555
               </span>
             </div>
 
-            {/* Mobile Primary Action Button */}
+            {/* Mobile / Tablet Primary Action Button */}
             <button
               type="button"
-              onClick={() => handleTriggerSyncSlot(selectedSlot)}
-              disabled={isSimulatingRun}
-              className="md:hidden px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              onClick={handlePrimarySyncClick}
+              disabled={isBusy}
+              className="lg:hidden px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
-              <Play className="w-3.5 h-3.5" />
-              {isSimulatingRun ? 'Bezig...' : `Sync (${selectedSlot})`}
+              {isBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+              {isBusy
+                ? 'Bezig...'
+                : containerMode === 'live'
+                ? 'Sync Nu'
+                : `Sync (${selectedSlot})`}
             </button>
           </div>
 
-          {/* Navigation Tabs - Responsive Grid on Mobile, Segmented Bar on Desktop */}
-          <nav className="grid grid-cols-3 md:flex items-center gap-1 p-1 bg-slate-100 rounded-lg w-full md:w-auto">
+          {/* Navigation Tabs - Responsive Grid on Mobile/Tablet, Segmented Bar on Desktop */}
+          <nav className="grid grid-cols-3 lg:flex items-center gap-1 p-1 bg-slate-100 rounded-lg w-full lg:w-auto shrink-0">
             <button
               type="button"
               onClick={() => setActiveTab('simulatie')}
@@ -396,7 +797,7 @@ export default function App() {
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Simulator & TTL
+              {containerMode === 'live' ? 'Live Sync & TTL' : 'Simulator & TTL'}
             </button>
             <button
               type="button"
@@ -425,12 +826,16 @@ export default function App() {
           {/* Desktop Primary Action Button */}
           <button
             type="button"
-            onClick={() => handleTriggerSyncSlot(selectedSlot)}
-            disabled={isSimulatingRun}
-            className="hidden md:flex px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            onClick={handlePrimarySyncClick}
+            disabled={isBusy}
+            className="hidden lg:flex px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 items-center gap-1.5 cursor-pointer disabled:opacity-50"
           >
-            <Play className="w-3.5 h-3.5" />
-            {isSimulatingRun ? 'Bezig...' : `Run Sync (${selectedSlot})`}
+            {isBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+            {isBusy
+              ? 'Synchroniseren...'
+              : containerMode === 'live'
+              ? 'Sync Nu (--force)'
+              : `Run Sync (${selectedSlot})`}
           </button>
         </div>
       </header>
@@ -713,49 +1118,229 @@ export default function App() {
 
         {/* Right Column on Desktop / First on Mobile: Focused Tab Content */}
         <main className="lg:col-span-8 order-1 lg:order-2 space-y-5 sm:space-y-6">
-          {/* Compact 3-Metric Summary Bar */}
+          {/* Compact 3-Metric Summary Bar (Real Live Data when connected to Container) */}
           <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-3 gap-3.5 sm:gap-4">
             <div className="min-w-0">
               <div className="text-xs text-slate-500">Supercronic Schema</div>
-              <div className="text-sm font-bold font-mono tabular-nums text-slate-900 mt-0.5">
-                {cronExpression} ({timeSlots.length}x / dag)
+              <div className="text-sm font-bold font-mono tabular-nums text-slate-900 mt-0.5 truncate">
+                {containerMode === 'live' && liveStatus
+                  ? liveStatus.cron_schedule
+                  : `${cronExpression} (${timeSlots.length}x / dag)`}
               </div>
-              <div className="text-[11px] text-slate-500">
-                {timeSlots[0]} t/m {timeSlots[timeSlots.length - 1]} · {config.timezone}
+              <div className="text-[11px] text-slate-500 truncate">
+                {containerMode === 'live' && liveStatus
+                  ? `Bron: ${liveStatus.shared_folder} · Poort ${liveStatus.port}`
+                  : `${timeSlots[0]} t/m ${timeSlots[timeSlots.length - 1]} · ${config.timezone}`}
               </div>
             </div>
 
             <div className="min-w-0">
               <div className="text-xs text-slate-500">Actieve Kluis (/vault)</div>
-              <div className="text-sm font-bold text-emerald-700 mt-0.5 flex items-center gap-1.5">
-                <Lock className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">
-                  {config.authMethod === 'sharepoint-cookie-vault'
-                    ? 'sp_cookies.enc (FedAuth)'
-                    : config.authMethod === 'rclone-docker-encrypted'
-                    ? 'rclone.conf (AES-256)'
-                    : 'token_cache.enc (Fernet)'}
-                </span>
-              </div>
-              <div className="text-[11px] text-slate-500 font-mono truncate">
-                {config.hostVaultVolumePath}
-              </div>
+              {containerMode === 'live' && liveStatus ? (
+                <>
+                  <div
+                    className={`text-sm font-bold mt-0.5 flex items-center gap-1.5 ${
+                      liveStatus.vault_present ? 'text-emerald-700' : 'text-amber-700'
+                    }`}
+                  >
+                    {liveStatus.vault_present ? (
+                      <Lock className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span className="truncate">
+                      {liveStatus.vault_present
+                        ? `${liveStatus.vault_type || 'sp_cookies.enc'} (Actief)`
+                        : 'Geen kluis in /vault'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 font-mono truncate">
+                    {liveStatus.vault_present && liveStatus.vault_updated_at
+                      ? `Bijgewerkt: ${liveStatus.vault_updated_at}`
+                      : config.hostVaultVolumePath}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-sm font-bold text-emerald-700 mt-0.5 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">
+                      {config.authMethod === 'sharepoint-cookie-vault'
+                        ? 'sp_cookies.enc (FedAuth)'
+                        : config.authMethod === 'rclone-docker-encrypted'
+                        ? 'rclone.conf (AES-256)'
+                        : 'token_cache.enc (Fernet)'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 font-mono truncate">
+                    {config.hostVaultVolumePath}
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="min-w-0">
               <div className="text-xs text-slate-500">Host Data Map & Filter</div>
               <div className="text-sm font-bold font-mono text-slate-900 mt-0.5 truncate">
-                {config.hostSyncVolumePath}
+                {containerMode === 'live' && liveStatus
+                  ? liveStatus.host_sync_dir || config.hostSyncVolumePath
+                  : config.hostSyncVolumePath}
               </div>
               <div className="text-[11px] text-slate-500 truncate">
-                Negeert: {config.ignoredFolders.join(', ') || 'Geen'}
+                {containerMode === 'live' && liveStatus
+                  ? `${liveStatus.total_files ?? 0} bestanden (${formatBytes(liveStatus.total_bytes ?? 0)}) · Negeert: ${liveStatus.ignored_folders || 'Geen'}`
+                  : `Negeert: ${config.ignoredFolders.join(', ') || 'Geen'}`}
               </div>
             </div>
           </div>
 
-          {/* TAB 1: SYNC SIMULATOR & ACCESS TOKEN TTL MONITOR */}
+          {/* TAB 1: LIVE CONTAINER SYNC + ACCESS TOKEN TTL + FILEBROWSER */}
           {activeTab === 'simulatie' && (
             <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-6 space-y-5 sm:space-y-6">
+              {/* Live Container Action Card (--force & --verify via /api/sync) */}
+              {containerMode === 'live' ? (
+                <div className="border border-emerald-200 bg-emerald-50/40 rounded-xl p-3.5 sm:p-4 space-y-3.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Activity className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span className="text-xs font-bold text-slate-900">
+                          Container Directe Sync (Poort {liveStatus?.port || 5555})
+                        </span>
+                        <span
+                          className={`text-[11px] font-mono px-1.5 py-0.5 rounded border ${
+                            liveStatus?.vault_present
+                              ? 'bg-white border-emerald-200 text-emerald-800'
+                              : 'bg-amber-50 border-amber-300 text-amber-800'
+                          }`}
+                        >
+                          {liveStatus?.vault_present
+                            ? `Kluis: ${liveStatus.vault_type}`
+                            : 'Geen kluis gevonden'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600">
+                        Voert <code className="font-mono">python3 /app/sync.py --force</code> direct uit in de container naar{' '}
+                        <code className="font-mono">{liveStatus?.host_sync_dir || config.hostSyncVolumePath}</code>{' '}
+                        (<code className="font-mono">{liveStatus?.local_sync_dir || config.containerDataPath}</code>).
+                        {liveStatus?.finished_at ? ` Laatste run: ${liveStatus.finished_at}.` : ''}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleTriggerLiveSync('force')}
+                        disabled={Boolean(liveStatus?.running || isTriggeringLive)}
+                        className="px-3 py-2 text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${liveStatus?.running ? 'animate-spin' : ''}`} />
+                        {liveStatus?.running && liveStatus?.mode === 'force'
+                          ? 'Bezig...'
+                          : 'Sync Nu (--force)'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleTriggerLiveSync('verify')}
+                        disabled={Boolean(liveStatus?.running || isTriggeringLive)}
+                        className="px-3 py-2 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        {liveStatus?.running && liveStatus?.mode === 'verify'
+                          ? 'Testen...'
+                          : 'Test (--verify)'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={fetchLiveStatus}
+                        aria-label="Ververs status"
+                        className="col-span-2 sm:col-span-1 px-2.5 py-2 text-xs font-medium bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded-lg transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span className="sm:hidden">Ververs Status</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {!liveStatus?.vault_present && (
+                    <div className="p-2.5 rounded-lg border border-amber-300 bg-amber-50 text-[11px] text-amber-900 space-y-1">
+                      <div className="font-semibold">Eenmalige Okta sessie vereist in /vault</div>
+                      <div>
+                        Voer op de Docker host eenmalig uit:{' '}
+                        <code className="font-mono font-semibold">{initCmd}</code>
+                      </div>
+                    </div>
+                  )}
+
+                  {liveError && (
+                    <div className="p-2.5 rounded-lg border border-red-300 bg-red-50 text-xs text-red-800">
+                      {liveError}
+                    </div>
+                  )}
+
+                  <div className="rounded-lg overflow-hidden border border-slate-800 bg-slate-950">
+                    <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-slate-900 border-b border-slate-800 text-[11px] font-mono">
+                      <span className="text-slate-300 truncate">
+                        {liveStatus?.command || '/tmp/oktasync.log'}
+                      </span>
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        {liveStatus?.running ? (
+                          <span className="font-semibold text-amber-400">Actief...</span>
+                        ) : liveStatus?.exit_code !== null && liveStatus?.exit_code !== undefined ? (
+                          <span
+                            className={`font-semibold ${
+                              liveStatus.exit_code === 0 ? 'text-emerald-400' : 'text-red-400'
+                            }`}
+                          >
+                            {liveStatus.exit_code === 0
+                              ? 'Exit 0 (OK)'
+                              : `Exit ${liveStatus.exit_code} (Fout)`}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">Gereed</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleClearLogs}
+                          disabled={
+                            Boolean(liveStatus?.running || isClearingLogs) ||
+                            (!liveStatus?.output && (!liveStatus?.runs || liveStatus.runs.length === 0))
+                          }
+                          className="px-2 py-0.5 text-[11px] font-sans font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Log wissen
+                        </button>
+                      </div>
+                    </div>
+                    <pre
+                      ref={logPreRef}
+                      className="p-3 text-[11px] font-mono text-slate-100 overflow-x-auto max-h-64 leading-relaxed whitespace-pre-wrap break-words"
+                    >
+                      {liveStatus?.output
+                        ? liveStatus.output
+                        : 'Log is leeg. Klik op "Sync Nu (--force)" of "Test (--verify)" om alle SharePoint-stappen live te bekijken.'}
+                    </pre>
+                  </div>
+                </div>
+              ) : (
+                <div className="border border-slate-200 bg-slate-50 rounded-xl px-3.5 py-2.5 text-xs text-slate-600 leading-relaxed">
+                  <strong>Preview-modus:</strong> In uw draaiende Docker-container op poort{' '}
+                  <code className="px-1.5 py-0.5 bg-slate-200/70 rounded font-mono text-[11px] text-slate-800">:5555</code>{' '}
+                  roept de knop <strong>Sync Nu</strong> direct{' '}
+                  <code className="px-1.5 py-0.5 bg-slate-200/70 rounded font-mono text-[11px] text-slate-800">
+                    python3 /app/sync.py --force
+                  </code>{' '}
+                  aan via{' '}
+                  <code className="px-1.5 py-0.5 bg-slate-200/70 rounded font-mono text-[11px] text-slate-800">
+                    POST /api/sync
+                  </code>
+                  .
+                </div>
+              )}
+
               {/* Visual 60-Minute Access Token Time-to-Live (TTL) Status & Progress Bar */}
               <div className={`border rounded-xl p-3.5 sm:p-4 space-y-3 transition-colors ${ttlState.borderColor}`}>
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
@@ -871,159 +1456,323 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Files Header & Controls */}
+              {/* Confined Filebrowser strictly locked inside /opt/docker/callsheets/data */}
               <div className="flex flex-col gap-3 pt-2 border-t border-slate-100">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap min-w-0">
+                    <FolderOpen className="w-4 h-4 text-emerald-700 shrink-0" />
+                    <span className="text-xs font-bold text-slate-900">
+                      Filebrowser
+                    </span>
+                    <code className="px-2 py-0.5 text-[11px] font-mono bg-slate-100 border border-slate-200 rounded text-slate-800 truncate">
+                      {activeBrowse.root_label}
+                    </code>
+                    <span className="text-[11px] font-mono text-slate-500">
+                      {activeBrowse.total_files} bestanden · {formatBytes(activeBrowse.total_bytes)}
+                    </span>
+                  </div>
+
+                  {containerMode === 'live' && (
+                    <div className="grid grid-cols-2 sm:inline-flex p-0.5 bg-slate-100 rounded-lg shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setDataSourceView('live')}
+                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
+                          dataSourceView === 'live' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+                        }`}
+                      >
+                        Live Filebrowser
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDataSourceView('simulator')}
+                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
+                          dataSourceView === 'simulator' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+                        }`}
+                      >
+                        Simulator
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Confined Breadcrumb & Up Navigation Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg">
+                  <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => activeBrowse.parent_path && handleNavigateBrowse(activeBrowse.parent_path)}
+                      disabled={!activeBrowse.parent_path || browseLoading}
+                      title="Bovenliggende map (stopt bij /opt/docker/callsheets/data)"
+                      className="px-2 py-1 text-[11px] font-semibold bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                    >
+                      <ArrowUp className="w-3 h-3" />
+                      Omhoog
+                    </button>
+
+                    <div className="flex items-center gap-1 flex-wrap text-xs font-mono min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => handleNavigateBrowse('/')}
+                        className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                          activeBrowse.current_path === '/'
+                            ? 'bg-slate-900 text-white font-semibold'
+                            : 'text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        {activeBrowse.root_label}
+                      </button>
+
+                      {browseBreadcrumbs.map((crumb, index) => (
+                        <React.Fragment key={crumb.path}>
+                          <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <button
+                            type="button"
+                            onClick={() => handleNavigateBrowse(crumb.path)}
+                            className={`px-2 py-0.5 rounded transition-colors cursor-pointer truncate max-w-[180px] ${
+                              index === browseBreadcrumbs.length - 1
+                                ? 'bg-slate-900 text-white font-semibold'
+                                : 'text-slate-700 hover:bg-slate-200'
+                            }`}
+                          >
+                            {crumb.label}
+                          </button>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+
+                  {showingLiveFiles && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        fetchBrowseDirectory(activeBrowse.current_path);
+                        fetchLiveStatus();
+                      }}
+                      disabled={browseLoading}
+                      className="px-2.5 py-1 text-[11px] font-medium bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded flex items-center gap-1 cursor-pointer disabled:opacity-50 shrink-0"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${browseLoading ? 'animate-spin' : ''}`} />
+                      Ververs
+                    </button>
+                  )}
+                </div>
+
+                {browseError && showingLiveFiles && (
+                  <div className="p-2.5 rounded-lg border border-red-300 bg-red-50 text-xs text-red-800">
+                    {browseError}
+                  </div>
+                )}
+
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                  <div className="relative flex-1">
-                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <div className="relative flex-1 min-w-0">
+                    <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center">
+                      <Search className="w-3.5 h-3.5 text-slate-400" />
+                    </span>
                     <input
                       type="text"
-                      placeholder="Zoek bestand of submap..."
+                      placeholder="Filter in deze map..."
                       value={fileSearch}
                       onChange={(e) => setFileSearch(e.target.value)}
-                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                      className="w-full h-9 pl-9 pr-3 text-xs leading-normal bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 sm:flex items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={handleAddSimulatedRemoteFile}
-                      className="px-2.5 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-lg transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      Nieuw Bestand
-                    </button>
+                  {!showingLiveFiles ? (
+                    <div className="grid grid-cols-2 sm:flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleAddSimulatedRemoteFile}
+                        className="h-9 px-3 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Nieuw Bestand
+                      </button>
 
-                    <button
-                      type="button"
-                      onClick={() => handleTriggerSyncSlot(selectedSlot)}
-                      className="px-3 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isSimulatingRun ? 'animate-spin' : ''}`} />
-                      Sync Nu ({pendingFilesCount})
-                    </button>
-                  </div>
-                </div>
-
-                {/* Status Filter Bar - Scrollable on small mobile screens */}
-                <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
-                  {(['alle', 'nieuw', 'gewijzigd', 'gesynchroniseerd', 'overgeslagen'] as const).map((st) => (
-                    <button
-                      key={st}
-                      type="button"
-                      onClick={() => setStatusFilter(st)}
-                      className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors capitalize whitespace-nowrap shrink-0 cursor-pointer ${
-                        statusFilter === st
-                          ? 'bg-white text-slate-900 shadow-sm'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      {st}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Mobile File Cards (< sm) & Desktop Table (sm+) */}
-              <div className="sm:hidden divide-y divide-slate-200 border border-slate-200 rounded-lg">
-                {filteredFiles.length === 0 ? (
-                  <div className="py-6 px-3 text-center text-xs text-slate-500">
-                    Geen bestanden gevonden voor dit filter.
-                  </div>
-                ) : (
-                  filteredFiles.map((file) => (
-                    <div key={file.id} className="p-3 space-y-1.5 text-xs">
-                      <div className="font-semibold text-slate-900 flex items-start gap-1.5 break-all">
-                        <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                        <span>{file.name}</span>
-                      </div>
-                      <div className="text-[11px] font-mono text-slate-500 break-all">
-                        {file.relativePath}
-                      </div>
-                      <div className="flex items-center justify-between pt-1 text-[11px]">
-                        <span className="font-mono text-slate-600">
-                          {formatBytes(file.sizeBytes)} · {file.modifiedAt}
-                        </span>
-                        {file.status === 'gesynchroniseerd' && (
-                          <span className="text-emerald-700 font-medium">
-                            Sync ({file.syncedAtSlot})
-                          </span>
-                        )}
-                        {file.status === 'nieuw' && (
-                          <span className="text-amber-700 font-semibold">Nieuw</span>
-                        )}
-                        {file.status === 'gewijzigd' && (
-                          <span className="text-amber-700 font-semibold">Gewijzigd</span>
-                        )}
-                        {file.status === 'overgeslagen' && (
-                          <span className="text-slate-500 font-medium">Genegeerd</span>
-                        )}
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleTriggerSyncSlot(selectedSlot)}
+                        className="h-9 px-3 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isSimulatingRun ? 'animate-spin' : ''}`} />
+                        Sync Nu ({pendingFilesCount})
+                      </button>
                     </div>
-                  ))
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleTriggerLiveSync('force')}
+                      disabled={Boolean(liveStatus?.running || isTriggeringLive)}
+                      className="h-9 px-3 text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${liveStatus?.running ? 'animate-spin' : ''}`} />
+                      {liveStatus?.running ? 'Synchroniseren...' : 'Nu Synchroniseren (--force)'}
+                    </button>
+                  )}
+                </div>
+
+                {/* Status Filter Bar in Simulator mode */}
+                {!showingLiveFiles && (
+                  <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
+                    {(['alle', 'nieuw', 'gewijzigd', 'gesynchroniseerd', 'overgeslagen'] as const).map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        onClick={() => setStatusFilter(st)}
+                        className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors capitalize whitespace-nowrap shrink-0 cursor-pointer ${
+                          statusFilter === st
+                            ? 'bg-white text-slate-900 shadow-sm'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
 
+              {/* Mobile Filebrowser Cards (< sm) */}
+              <div className="sm:hidden divide-y divide-slate-200 border border-slate-200 rounded-lg">
+                {filteredBrowseEntries.length === 0 ? (
+                  <div className="py-6 px-3 text-center text-xs text-slate-500">
+                    {browseLoading
+                      ? 'Map laden...'
+                      : showingLiveFiles
+                      ? `Geen mappen of bestanden gevonden in ${activeBrowse.root_label}${activeBrowse.current_path === '/' ? '' : activeBrowse.current_path}.`
+                      : 'Geen bestanden gevonden in deze map.'}
+                  </div>
+                ) : (
+                  filteredBrowseEntries.map((entry) =>
+                    entry.type === 'dir' ? (
+                      <button
+                        key={entry.path}
+                        type="button"
+                        onClick={() => handleNavigateBrowse(entry.path)}
+                        className="w-full p-3 text-left flex items-center justify-between gap-2 hover:bg-slate-50 transition-colors cursor-pointer"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="text-xs font-semibold text-slate-900 flex items-center gap-1.5 truncate">
+                            <Folder className="w-4 h-4 text-amber-500 shrink-0" />
+                            <span className="truncate">{entry.name}</span>
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500">
+                            {entry.itemCount ?? 0} item(s) · {entry.modifiedAt}
+                          </div>
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+                      </button>
+                    ) : (
+                      <div key={entry.path} className="p-3 space-y-1.5 text-xs">
+                        <div className="font-semibold text-slate-900 flex items-start gap-1.5 break-all">
+                          <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                          <span>{entry.name}</span>
+                        </div>
+                        <div className="flex items-center justify-between pt-1 text-[11px]">
+                          <span className="font-mono text-slate-600">
+                            {formatBytes(entry.sizeBytes)} · {entry.modifiedAt}
+                          </span>
+                          {showingLiveFiles ? (
+                            <a
+                              href={`/api/files/download?path=${encodeURIComponent(entry.path)}`}
+                              download={entry.name}
+                              className="px-2 py-1 text-[11px] font-semibold bg-slate-900 text-white rounded flex items-center gap-1"
+                            >
+                              <Download className="w-3 h-3" />
+                              Download
+                            </a>
+                          ) : (
+                            <span className="text-slate-500 font-mono">Preview</span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  )
+                )}
+              </div>
+
+              {/* Desktop Filebrowser Table (sm+) */}
               <div className="hidden sm:block overflow-x-auto border border-slate-200 rounded-lg">
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
-                      <th className="py-2 px-3">Bestandsnaam & SharePoint Pad</th>
-                      <th className="py-2 px-3 text-right">Grootte</th>
+                      <th className="py-2 px-3">Naam</th>
+                      <th className="py-2 px-3 text-right">Grootte / Items</th>
                       <th className="py-2 px-3 text-right">Gewijzigd</th>
-                      <th className="py-2 px-3">Status</th>
+                      <th className="py-2 px-3 text-right">Actie</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 text-xs">
-                    {filteredFiles.length === 0 ? (
+                    {filteredBrowseEntries.length === 0 ? (
                       <tr>
                         <td colSpan={4} className="py-6 text-center text-slate-500">
-                          Geen bestanden gevonden voor dit filter.
+                          {browseLoading
+                            ? 'Map laden...'
+                            : showingLiveFiles
+                            ? `Nog geen bestanden aanwezig in ${activeBrowse.root_label}${activeBrowse.current_path === '/' ? '' : activeBrowse.current_path}. Klik op Sync Nu (--force) om te synchroniseren.`
+                            : 'Geen bestanden of submappen gevonden voor dit filter.'}
                         </td>
                       </tr>
                     ) : (
-                      filteredFiles.map((file) => (
-                        <tr key={file.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="py-2 px-3">
-                            <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                              <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                              <span>{file.name}</span>
-                            </div>
-                            <div className="text-[11px] font-mono text-slate-500">
-                              {file.relativePath}
-                            </div>
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
-                            {formatBytes(file.sizeBytes)}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600">
-                            {file.modifiedAt}
-                          </td>
-                          <td className="py-2 px-3">
-                            {file.status === 'gesynchroniseerd' && (
-                              <span className="text-emerald-700 font-medium">
-                                Gesynchroniseerd ({file.syncedAtSlot})
+                      filteredBrowseEntries.map((entry) =>
+                        entry.type === 'dir' ? (
+                          <tr
+                            key={entry.path}
+                            onClick={() => handleNavigateBrowse(entry.path)}
+                            className="hover:bg-slate-50/90 transition-colors cursor-pointer"
+                          >
+                            <td className="py-2 px-3">
+                              <div className="font-semibold text-slate-900 flex items-center gap-2">
+                                <Folder className="w-4 h-4 text-amber-500 shrink-0" />
+                                <span>{entry.name}</span>
+                              </div>
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600">
+                              {entry.itemCount ?? 0} item(s)
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600">
+                              {entry.modifiedAt}
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700">
+                                Open map
+                                <ChevronRight className="w-3.5 h-3.5" />
                               </span>
-                            )}
-                            {file.status === 'nieuw' && (
-                              <span className="text-amber-700 font-semibold">
-                                Nieuw (wacht op sync)
-                              </span>
-                            )}
-                            {file.status === 'gewijzigd' && (
-                              <span className="text-amber-700 font-semibold">
-                                Gewijzigd op O365
-                              </span>
-                            )}
-                            {file.status === 'overgeslagen' && (
-                              <span className="text-slate-500 font-medium">
-                                Genegeerd (Ignore-map)
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      ))
+                            </td>
+                          </tr>
+                        ) : (
+                          <tr key={entry.path} className="hover:bg-slate-50/80 transition-colors">
+                            <td className="py-2 px-3">
+                              <div className="font-semibold text-slate-900 flex items-center gap-2">
+                                <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                <span>{entry.name}</span>
+                              </div>
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
+                              {formatBytes(entry.sizeBytes)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600">
+                              {entry.modifiedAt}
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              {showingLiveFiles ? (
+                                <a
+                                  href={`/api/files/download?path=${encodeURIComponent(entry.path)}`}
+                                  download={entry.name}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded transition-colors"
+                                >
+                                  <Download className="w-3 h-3" />
+                                  Download
+                                </a>
+                              ) : (
+                                <span className="text-[11px] font-mono text-slate-500">
+                                  Preview
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      )
                     )}
                   </tbody>
                 </table>
@@ -1031,31 +1780,83 @@ export default function App() {
 
               {/* Compact Container Run Logs */}
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                    Recente Container Runs (Supercronic Log)
+                    {showingLiveFiles ? 'Recente Web-gestarte Runs' : 'Recente Container Runs (Supercronic Log)'}
                   </h3>
-                  <span className="text-[11px] text-slate-500 font-mono">
-                    Laatste {Math.min(4, runLogs.length)} van {runLogs.length}
-                  </span>
+                  <div className="flex items-center gap-2.5 shrink-0">
+                    <span className="text-[11px] text-slate-500 font-mono">
+                      {showingLiveFiles
+                        ? `${liveStatus?.runs?.length ?? 0} runs in sessie`
+                        : `${runLogs.length} runs`}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleClearLogs}
+                      disabled={
+                        showingLiveFiles
+                          ? Boolean(liveStatus?.running || isClearingLogs) ||
+                            (!liveStatus?.output && (!liveStatus?.runs || liveStatus.runs.length === 0))
+                          : runLogs.length === 0
+                      }
+                      className="px-2 py-1 text-[11px] font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      Log wissen
+                    </button>
+                  </div>
                 </div>
-                <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg bg-slate-50/50">
-                  {runLogs.slice(0, 4).map((log) => (
-                    <div key={log.id} className="p-2.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 font-semibold text-slate-900 flex-wrap">
-                          <span className="font-mono">{log.slotTime}</span>
-                          <span className="text-slate-400">·</span>
-                          <span className="text-emerald-700">{log.tokenStatus}</span>
+                {showingLiveFiles ? (
+                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg bg-slate-50/50">
+                    {!liveStatus?.runs || liveStatus.runs.length === 0 ? (
+                      <div className="p-3 text-xs text-slate-500">
+                        Nog geen handmatige sync-runs gelogd (of log gewist).
+                      </div>
+                    ) : (
+                      liveStatus.runs.slice(0, 5).map((run) => (
+                        <div key={run.id} className="p-2.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 font-semibold text-slate-900 flex-wrap">
+                              <span className="font-mono">--{run.mode}</span>
+                              <span className="text-slate-400">·</span>
+                              <span className={run.exit_code === 0 ? 'text-emerald-700' : 'text-red-700'}>
+                                {run.exit_code === 0 ? 'Voltooid (Exit 0)' : `Fout (Exit ${run.exit_code})`}
+                              </span>
+                            </div>
+                            <p className="text-slate-600 text-[11px] break-words font-mono">{run.summary}</p>
+                          </div>
+                          <div className="sm:text-right font-mono tabular-nums text-[11px] text-slate-500 shrink-0">
+                            {run.finished_at || run.started_at}
+                          </div>
                         </div>
-                        <p className="text-slate-600 text-[11px] break-words">{log.details}</p>
+                      ))
+                    )}
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg bg-slate-50/50">
+                    {runLogs.length === 0 ? (
+                      <div className="p-3 text-xs text-slate-500">
+                        Log gewist. Start een sync-slot hierboven om een nieuwe run te loggen.
                       </div>
-                      <div className="sm:text-right font-mono tabular-nums text-[11px] text-slate-500 shrink-0">
-                        {log.filesDownloaded} nieuw · {formatBytes(log.bytesTransferred)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ) : (
+                      runLogs.slice(0, 4).map((log) => (
+                        <div key={log.id} className="p-2.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 font-semibold text-slate-900 flex-wrap">
+                              <span className="font-mono">{log.slotTime}</span>
+                              <span className="text-slate-400">·</span>
+                              <span className="text-emerald-700">{log.tokenStatus}</span>
+                            </div>
+                            <p className="text-slate-600 text-[11px] break-words">{log.details}</p>
+                          </div>
+                          <div className="sm:text-right font-mono tabular-nums text-[11px] text-slate-500 shrink-0">
+                            {log.filesDownloaded} nieuw · {formatBytes(log.bytesTransferred)}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -1080,6 +1881,7 @@ export default function App() {
                       ['dockerfile', 'Dockerfile'],
                       ['github-workflow', 'GitHub Action'],
                       ['sync-py', 'sync.py'],
+                      ['web-server', 'web_server.py'],
                       ['entrypoint', 'entrypoint.sh'],
                       ['setup-repo', 'setup-repo.sh']
                     ] as const

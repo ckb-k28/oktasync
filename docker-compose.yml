@@ -26,6 +26,7 @@ services:
       - OKTA_FEDERATION_URL=https://nepglobal.okta.com
       - O365_USERNAME_HINT=voornaam.achternaam@nepworldwide.nl
       - LOCAL_SYNC_DIR=/data/sync
+      - HOST_SYNC_DIR=/opt/docker/callsheets/data
       - TOKEN_VAULT_FILE=/vault/token_cache.enc
       - COOKIE_VAULT_FILE=/vault/sp_cookies.enc
       # Genereer eenmalig op de host met:

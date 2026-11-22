@@ -8,15 +8,17 @@ WORKDIR /web
 COPY package.json ./
 RUN npm install --legacy-peer-deps --no-audit --no-fund
 
+COPY VERSION ./
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
-ARG APP_VERSION=v.01
+ARG APP_VERSION=""
+RUN if [ -n "$APP_VERSION" ]; then printf '%s\n' "$APP_VERSION" > VERSION; fi
 ENV VITE_APP_VERSION=${APP_VERSION}
 RUN npm run build
 
 FROM --platform=linux/amd64 python:3.12-slim-bookworm
 
-ARG APP_VERSION=v.01
+ARG APP_VERSION=""
 
 # Installeer tijdzone-data, ca-certificates en Supercronic (non-root cron runner voor Docker)
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -51,7 +53,7 @@ RUN pip install --no-cache-dir \
 
 # Kopieer gebouwde webapplicatie en Python sync-bestanden
 COPY --from=web-builder /web/dist /app/dist
-COPY VERSION /app/VERSION
+COPY --from=web-builder /web/VERSION /app/VERSION
 COPY sync.py /app/sync.py
 COPY web_server.py /app/web_server.py
 COPY entrypoint.sh /app/entrypoint.sh
